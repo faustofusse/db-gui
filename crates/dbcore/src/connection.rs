@@ -10,7 +10,9 @@ use crate::driver::{Driver, Error, Result};
 use crate::model::{ConnectionConfig, QueryResult, Schema, TableInfo};
 use crate::mock::{self, MockDriver};
 use crate::model::DatabaseKind;
+use crate::mysql::MysqlDriver;
 use crate::postgres::PostgresDriver;
+use crate::sqlite::SqliteDriver;
 
 /// The core owns its tokio runtime, so callers can await from any executor
 /// (Swift concurrency through FFI, GPUI's executor, or tokio itself).
@@ -58,8 +60,8 @@ fn make_driver(config: ConnectionConfig) -> Arc<dyn Driver> {
     }
     match config.kind {
         DatabaseKind::Postgres => Arc::new(PostgresDriver::new(config)),
-        // No real drivers yet: keep the UI usable with sample data.
-        DatabaseKind::Mysql | DatabaseKind::Sqlite => Arc::new(MockDriver::new(config)),
+        DatabaseKind::Mysql => Arc::new(MysqlDriver::new(config)),
+        DatabaseKind::Sqlite => Arc::new(SqliteDriver::new(config)),
     }
 }
 

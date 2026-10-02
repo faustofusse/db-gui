@@ -19,6 +19,10 @@ tokio-postgres-rustls = "0.14"
 # ring backend: no cmake/NASM needed (aws-lc-rs would need them on Linux)
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging", "tls12"] }
 webpki-roots = "1"
+# MySQL/MariaDB: rustls with the ring provider (no aws-lc / cmake), pure-Rust zlib
+mysql_async = { version = "0.37", default-features = false, features = ["default-rustls-ring"] }
+# SQLite: compiles the bundled amalgamation, no system libsqlite3 needed
+rusqlite = { version = "0.40", features = ["bundled", "column_decltype"] }
 futures-util = { version = "0.3", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

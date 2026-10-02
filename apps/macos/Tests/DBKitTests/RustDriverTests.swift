@@ -12,6 +12,11 @@ private var devDB: ConnectionConfig { connections.first { $0.id == "local-pg" }!
 /// Mock Postgres with the sample schema.
 private var appDev: ConnectionConfig { connections.first { $0.id == "staging-pg" }! }
 private let postgresEnabled = ProcessInfo.processInfo.environment["DBEAR_TEST_POSTGRES"] == "1"
+private let mysqlEnabled = ProcessInfo.processInfo.environment["DBEAR_TEST_MYSQL"] == "1"
+/// Real dev MySQL (scripts/dev-db.sh up mysql) and SQLite file (scripts/dev-db.sh up sqlite).
+private var devMySQL: ConnectionConfig { connections.first { $0.id == "local-mysql" }! }
+private var devSQLite: ConnectionConfig { connections.first { $0.id == "local-sqlite" }! }
+private let sqliteSeeded = FileManager.default.fileExists(atPath: Drivers.sampleConnections().first { $0.id == "local-sqlite" }!.database)
 
 @Test func loadsSampleConnectionsWithSummary() {
     #expect(connections.count == 6)
@@ -30,6 +35,27 @@ private let postgresEnabled = ProcessInfo.processInfo.environment["DBEAR_TEST_PO
     #expect(await driver.isConnected())
     await driver.disconnect()
     #expect(await !driver.isConnected())
+}
+
+@Test(.enabled(if: mysqlEnabled)) func realMySQLRoundTrip() async throws {
+    #expect(!devMySQL.supportsMultipleDatabases && devMySQL.showAllDatabases)
+    let driver = Drivers.make(for: devMySQL)
+    // Databases are schemas: one connection lists them all.
+    #expect(try await driver.listSchemas().map(\.name) == ["archive", "blog", "shop"])
+    let page = try await driver.fetchRows(of: TableInfo(schema: "shop", name: "orders"), limit: 10, offset: 0)
+    #expect(page.rows.count == 10 && page.totalCount == 1200)
+    #expect(page.rows[0].values[3] == .decimal("27.31"))
+    await driver.disconnect()
+}
+
+@Test(.enabled(if: sqliteSeeded)) func realSQLiteRoundTrip() async throws {
+    #expect(!devSQLite.supportsMultipleDatabases)
+    let driver = Drivers.make(for: devSQLite)
+    let schemas = try await driver.listSchemas()
+    #expect(schemas.map(\.name) == ["main"])
+    let page = try await driver.fetchRows(of: TableInfo(schema: "main", name: "settings"), limit: 10, offset: 0)
+    #expect(page.rows.map { $0.values[1] } == [.text("dark"), .int(13), .double(1.25), .null, .text("0xdeadbeef")])
+    await driver.disconnect()
 }
 
 @Test(.enabled(if: postgresEnabled)) func cancelsRunningQuery() async throws {

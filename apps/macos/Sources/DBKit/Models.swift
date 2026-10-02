@@ -58,8 +58,9 @@ public struct ConnectionConfig: Identifiable, Hashable, Sendable {
         self.summary = summary
     }
 
-    /// Servers can hold several databases; SQLite files can't.
-    public var supportsMultipleDatabases: Bool { kind != .sqlite }
+    /// Sibling databases are listed under the connection in the sidebar, each with its own
+    /// session (Postgres). MySQL lists them as schemas instead; SQLite files have none.
+    public var supportsMultipleDatabases: Bool { kind == .postgres }
 }
 
 public enum TableKind: String, Sendable, Hashable {

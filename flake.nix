@@ -42,6 +42,7 @@
         common = with pkgs; [
           rust
           pkg-config
+          sqlite # sqlite3 CLI for scripts/dev-db.sh
         ];
       in
       {

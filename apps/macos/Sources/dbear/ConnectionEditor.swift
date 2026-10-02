@@ -1,5 +1,6 @@
 import DBKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// "New Connection" / "Edit Connection" sheet.
 struct ConnectionEditor: View {
@@ -37,8 +38,12 @@ struct ConnectionEditor: View {
             Form {
                 if isNew { urlSection }
                 generalSection
-                serverSection
-                authSection
+                if draft.kind == .sqlite {
+                    fileSection
+                } else {
+                    serverSection
+                    authSection
+                }
             }
             .formStyle(.grouped)
             .scrollBounceBehavior(.basedOnSize)
@@ -48,6 +53,10 @@ struct ConnectionEditor: View {
         .fixedSize(horizontal: false, vertical: true)
         .onAppear { hasSavedPassword = model.hasSavedPassword(draft.id) }
         .onChange(of: draft) { test = .idle; saveError = nil }
+        .onChange(of: draft.kind) { old, new in kindChanged(from: old, to: new) }
+        .fileImporter(isPresented: $choosingFile, allowedContentTypes: [.item]) { result in
+            if case .success(let url) = result { draft.database = url.path }
+        }
         .onChange(of: password) { test = .idle }
     }
 
@@ -113,26 +122,42 @@ struct ConnectionEditor: View {
         }
     }
 
-    private var serverSection: some View {
-        Section("Server") {
-            Picker("Type", selection: $draft.kind) {
-                ForEach(DatabaseKind.allCases, id: \.self) { kind in
-                    Text(kind == .postgres ? kind.displayName : "\(kind.displayName) (coming soon)")
-                        .tag(kind)
-                        .selectionDisabled(kind != .postgres)
+    private var kindPicker: some View {
+        Picker("Type", selection: $draft.kind) {
+            ForEach(DatabaseKind.allCases, id: \.self) { kind in
+                Text(kind.displayName).tag(kind)
+            }
+        }
+    }
+
+    private var fileSection: some View {
+        Section("Database") {
+            kindPicker
+            LabeledContent("File") {
+                HStack(spacing: 6) {
+                    TextField("File", text: $draft.database, prompt: Text("Required"))
+                        .labelsHidden()
+                        .truncationMode(.head)
+                    Button("Choose…") { choosingFile = true }
                 }
             }
+        }
+    }
+
+    private var serverSection: some View {
+        Section("Server") {
+            kindPicker
             TextField("Host", text: $draft.host, prompt: Text(verbatim: "localhost"))
             TextField(
                 "Port", value: $draft.port, format: .number.grouping(.never),
                 prompt: Text(verbatim: draft.kind.defaultPort.map(String.init) ?? "")
             )
             TextField("Database", text: $draft.database, prompt: Text(verbatim: databasePrompt))
-            if draft.supportsMultipleDatabases {
-                Toggle(isOn: $draft.showAllDatabases) {
-                    Text("Show all databases")
-                    Text("List every database on the server in the sidebar. The one above opens by default.")
-                }
+            Toggle(isOn: $draft.showAllDatabases) {
+                Text("Show all databases")
+                Text(draft.supportsMultipleDatabases
+                     ? "List every database on the server in the sidebar. The one above opens by default."
+                     : "List every database on the server as a section. Otherwise only the one above.")
             }
         }
     }
@@ -141,12 +166,13 @@ struct ConnectionEditor: View {
     private var databasePrompt: String {
         if draft.kind == .sqlite { return "Required" }
         let fallback = ConnectionConfig(id: "", name: "", group: "", kind: draft.kind, host: "", database: "").defaultDatabase
-        return fallback.isEmpty ? "Optional" : "Optional (\(fallback))"
+        if !fallback.isEmpty { return "Optional (\(fallback))" }
+        return draft.showAllDatabases ? "Optional (all databases)" : "Optional"
     }
 
     private var authSection: some View {
         Section {
-            TextField("User", text: userBinding, prompt: Text(verbatim: "postgres"))
+            TextField("User", text: userBinding, prompt: Text(verbatim: draft.kind == .mysql ? "root" : "postgres"))
             SecureField("Password", text: $password, prompt: Text(passwordPrompt))
                 .onChange(of: password) { passwordEdited = true }
             Picker("SSL", selection: $draft.sslMode) {
@@ -244,6 +270,15 @@ struct ConnectionEditor: View {
         }
     }
     @State private var lastAutoName = ""
+    @State private var choosingFile = false
+
+    /// Fields that mean something else for the new type are reset (a file path isn't a database name).
+    private func kindChanged(from old: DatabaseKind, to new: DatabaseKind) {
+        guard old != new else { return }
+        if (old == .sqlite) != (new == .sqlite) { draft.database = "" }
+        if new != .sqlite, draft.host.trimmingCharacters(in: .whitespaces).isEmpty { draft.host = "localhost" }
+        if draft.port == old.defaultPort { draft.port = nil }
+    }
 
     private func runTest() async {
         test = .running

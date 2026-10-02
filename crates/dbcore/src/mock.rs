@@ -14,12 +14,22 @@ use crate::model::*;
 /// Connections that simulate a failure (shows the warning state in the UI).
 pub const UNREACHABLE: &[&str] = &["prod-replica"];
 
-/// The sample connection backed by the real dev database (`scripts/dev-db.sh up`).
+/// The sample connection backed by the real dev Postgres (`scripts/dev-db.sh up postgres`).
 pub const DEV_DATABASE: &str = "local-pg";
+/// The sample connection backed by the real dev MySQL (`scripts/dev-db.sh up mysql`).
+pub const DEV_MYSQL: &str = "local-mysql";
+/// The sample connection backed by the dev SQLite file (`scripts/dev-db.sh up sqlite`).
+pub const DEV_SQLITE: &str = "local-sqlite";
 
-/// Sample connections served by [`MockDriver`] (everything except the dev database).
+/// Sample connections served by [`MockDriver`] (everything except the dev databases).
 pub fn is_mock(config: &ConnectionConfig) -> bool {
-    config.id != DEV_DATABASE && connections().iter().any(|c| c.id == config.id)
+    ![DEV_DATABASE, DEV_MYSQL, DEV_SQLITE].contains(&config.id.as_str()) && connections().iter().any(|c| c.id == config.id)
+}
+
+/// `dev/sqlite/app.db` in this checkout (sample connections are a development aid).
+pub fn dev_sqlite_path() -> String {
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().and_then(|p| p.parent());
+    repo.map(|r| r.join("dev/sqlite/app.db").display().to_string()).unwrap_or_default()
 }
 
 pub fn connections() -> Vec<ConnectionConfig> {
@@ -48,8 +58,12 @@ pub fn connections() -> Vec<ConnectionConfig> {
             password: Some("postgres".into()),
             ..conn(DEV_DATABASE, "app_dev", "Local", Postgres, "localhost", Some(54329), "app_dev", Some("postgres"))
         },
-        conn("local-mysql", "wordpress", "Local", Mysql, "localhost", Some(3306), "wordpress", Some("root")),
-        conn("local-sqlite", "notes.db", "Local", Sqlite, "~/Library/Application Support/Notes", None, "notes.db", None),
+        // No database: every database on the server is listed as a schema.
+        ConnectionConfig {
+            password: Some("mysql".into()),
+            ..conn(DEV_MYSQL, "mysql_dev", "Local", Mysql, "localhost", Some(33069), "", Some("root"))
+        },
+        conn(DEV_SQLITE, "app.db", "Local", Sqlite, "", None, &dev_sqlite_path(), None),
         conn("staging-pg", "app_staging", "Staging", Postgres, "staging-db.internal", Some(5432), "app", Some("readonly")),
         conn("prod-pg", "app_production", "Production", Postgres, "prod-db.internal", Some(5432), "app", Some("readonly")),
         conn("prod-replica", "app_replica", "Production", Postgres, "replica-db.internal", Some(5432), "app", Some("readonly")),
@@ -457,7 +471,7 @@ mod tests {
     #[test]
     fn only_the_dev_database_is_real() {
         let real: Vec<_> = connections().into_iter().filter(|c| !is_mock(c)).map(|c| c.id).collect();
-        assert_eq!(real, [DEV_DATABASE]);
+        assert_eq!(real, [DEV_DATABASE, DEV_MYSQL, DEV_SQLITE]);
         assert!(format!("{:?}", connections()[0]).contains("password: Some(\"•••\")"));
     }
 
@@ -465,6 +479,7 @@ mod tests {
     fn summary_formats() {
         let c = &connections();
         assert_eq!(c[0].summary(), "PostgreSQL · localhost:54329/app_dev");
-        assert_eq!(c[2].summary(), "SQLite · notes.db");
+        assert_eq!(c[1].summary(), "MySQL · localhost:33069");
+        assert!(c[2].summary().starts_with("SQLite · /") && c[2].summary().ends_with("dev/sqlite/app.db"));
     }
 }

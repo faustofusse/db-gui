@@ -43,7 +43,10 @@ struct TablesList: View {
         }
         if tablesOnly { return "Filter by: Tables only" }
         let tables = schemas.reduce(0) { $0 + $1.tables.count }
-        return "\(schemas.count) schemas, \(tables) tables"
+        // MySQL databases are listed as the sections; SQLite's are attached databases.
+        let section = model.selectedTarget?.kind == .postgres ? "schema" : "database"
+        func count(_ n: Int, _ noun: String) -> String { "\(n) \(noun)\(n == 1 ? "" : "s")" }
+        return "\(count(schemas.count, section)), \(count(tables, "table"))"
     }
 
     @ViewBuilder

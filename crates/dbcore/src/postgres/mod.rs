@@ -18,6 +18,7 @@ use tokio_postgres::types::{Kind, Type};
 use tokio_postgres::{CancelToken, Client, SimpleQueryMessage};
 use tokio_postgres_rustls::MakeRustlsConnect;
 
+use crate::dialect::{error_chain, line_column, Dialect};
 use crate::driver::{Driver, Error, Result};
 use crate::model::*;
 
@@ -194,15 +195,15 @@ impl Driver for PostgresDriver {
         let relation = quote_relation(&table.schema, &table.name);
         let meta = TableMeta::load(&client, &relation, table).await?;
 
-        let order_by = if !meta.primary_key.is_empty() {
-            format!(" order by {}", meta.primary_key.iter().map(|c| quote_ident(c)).collect::<Vec<_>>().join(", "))
+        let order_by: Vec<String> = if !meta.primary_key.is_empty() {
+            meta.primary_key.iter().map(|c| quote_ident(c)).collect()
         } else if meta.relkind == "r" {
             // No primary key: physical order is stable enough for paging an idle table.
-            " order by ctid".into()
+            vec!["ctid".into()]
         } else {
-            String::new()
+            Vec::new()
         };
-        let sql = format!("select * from {relation}{order_by} limit {limit} offset {offset}");
+        let sql = PG.page_query(&relation, &order_by, limit, offset);
 
         let mut result = run_single(&client, &sql).await?;
         // Catalog names read better than wire type names ("timestamp with time zone" vs "timestamptz").
@@ -399,12 +400,14 @@ impl TableMeta {
     }
 }
 
+const PG: Dialect = Dialect(DatabaseKind::Postgres);
+
 fn quote_ident(name: &str) -> String {
-    format!("\"{}\"", name.replace('"', "\"\""))
+    PG.quote_ident(name)
 }
 
 fn quote_relation(schema: &str, name: &str) -> String {
-    format!("{}.{}", quote_ident(schema), quote_ident(name))
+    PG.quote_relation(schema, name)
 }
 
 // MARK: Cancellation
@@ -459,7 +462,7 @@ fn query_error(e: &tokio_postgres::Error, sql: Option<&str>) -> Error {
 
     let mut message = format!("{}: {}", db.severity(), db.message());
     if let (Some(sql), Some(tokio_postgres::error::ErrorPosition::Original(position))) = (sql, db.position()) {
-        let (line, column) = line_column(sql, *position as usize);
+        let (line, column) = line_column(sql, (*position as usize).saturating_sub(1));
         message.push_str(&format!(" (line {line}, column {column})"));
     }
     if let Some(detail) = db.detail() {
@@ -469,14 +472,6 @@ fn query_error(e: &tokio_postgres::Error, sql: Option<&str>) -> Error {
         message.push_str(&format!("\nHINT: {hint}"));
     }
     Error::Query(message)
-}
-
-/// Postgres positions are 1-based character offsets.
-fn line_column(sql: &str, position: usize) -> (usize, usize) {
-    let before: String = sql.chars().take(position.saturating_sub(1)).collect();
-    let line = before.matches('\n').count() + 1;
-    let column = before.rsplit('\n').next().map_or(0, |l| l.chars().count()) + 1;
-    (line, column)
 }
 
 /// "error connecting to server: Connection refused (os error 61)" instead of just the top level.
@@ -491,19 +486,6 @@ fn connect_error(e: &tokio_postgres::Error) -> String {
     }
 }
 
-fn error_chain(e: &(dyn std::error::Error + 'static)) -> String {
-    let mut message = e.to_string();
-    let mut source = e.source();
-    while let Some(s) = source {
-        let text = s.to_string();
-        if !message.contains(&text) {
-            message.push_str(": ");
-            message.push_str(&text);
-        }
-        source = s.source();
-    }
-    message
-}
 
 #[cfg(test)]
 mod tests {
@@ -525,9 +507,4 @@ mod tests {
         assert_eq!(quote_relation("public", r#"we"ird"#), r#""public"."we""ird""#);
     }
 
-    #[test]
-    fn maps_positions_to_line_and_column() {
-        assert_eq!(line_column("select\n  fro", 10), (2, 3));
-        assert_eq!(line_column("selec 1", 1), (1, 1));
-    }
 }

@@ -57,8 +57,8 @@ pub struct ConnectionConfig {
     /// Supplied by the frontend from the platform keychain; never persisted by the core.
     pub password: Option<String>,
     pub ssl_mode: SslMode,
-    /// List every database on the server (sidebar), not just `database`.
-    /// `database` stays the one used to connect first and the default selection.
+    /// List every database on the server, not just `database`: in the sidebar for Postgres,
+    /// as schemas for MySQL. `database` stays the one used to connect first and the default selection.
     pub show_all_databases: bool,
 }
 
@@ -81,9 +81,10 @@ impl std::fmt::Debug for ConnectionConfig {
 }
 
 impl ConnectionConfig {
-    /// Whether this kind of database can have siblings on the same server.
+    /// Whether sibling databases are listed under the connection in the sidebar, each opened
+    /// with its own session (Postgres). MySQL lists them as schemas instead; SQLite has none.
     pub fn supports_multiple_databases(&self) -> bool {
-        self.kind != DatabaseKind::Sqlite
+        self.kind == DatabaseKind::Postgres
     }
 
     /// The same connection pointed at another database on the server.

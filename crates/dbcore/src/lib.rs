@@ -6,11 +6,14 @@
 
 mod config;
 mod connection;
+pub mod dialect;
 pub mod driver;
 pub mod highlight;
 pub mod mock;
 pub mod model;
+pub mod mysql;
 pub mod postgres;
+pub mod sqlite;
 pub mod store;
 
 pub use connection::Connection;
