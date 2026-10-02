@@ -5,26 +5,35 @@ import SwiftUI
 struct ScriptTabView: View {
     @Environment(AppModel.self) private var model
     @Bindable var tab: ScriptTab
+    @FocusState private var editorFocused: Bool
+    @State private var selection: TextSelection?
 
     var body: some View {
-        VSplitView {
+        // Split position lives on the tab, so it survives switching tabs.
+        VerticalSplit(topHeight: $tab.editorHeight, minTop: 120, minBottom: 150) {
             VStack(spacing: 0) {
                 editorBar
-                TextEditor(text: $tab.text)
+                TextEditor(text: $tab.text, selection: $selection)
+                    .focused($editorFocused)
                     .font(.system(.body, design: .monospaced))
                     .scrollContentBackground(.hidden)
                     .autocorrectionDisabled()
                     .padding(.horizontal, 8)
                     .padding(.vertical, 6)
             }
-            // VSplitView sizes panes to their content; force full width so the
-            // layout doesn't shift when the result state changes.
-            .frame(maxWidth: .infinity, minHeight: 160, idealHeight: 220, maxHeight: .infinity)
-
+        } bottom: {
             results
-                .frame(maxWidth: .infinity, minHeight: 150, idealHeight: 600, maxHeight: .infinity)
-                .layoutPriority(1)
         }
+        .onAppear(perform: focusNewScript)
+    }
+
+    /// Caret at the end of the template, ready to type.
+    private func focusNewScript() {
+        guard tab.needsInitialFocus else { return }
+        tab.needsInitialFocus = false
+        selection = TextSelection(insertionPoint: tab.text.endIndex)
+        // The editor's NSTextView isn't in the window until the next run loop turn.
+        DispatchQueue.main.async { editorFocused = true }
     }
 
     private var editorBar: some View {

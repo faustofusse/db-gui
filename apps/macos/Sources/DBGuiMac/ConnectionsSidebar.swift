@@ -13,12 +13,14 @@ struct ConnectionsSidebar: View {
                     ForEach(group.connections) { connection in
                         ConnectionRow(
                             connection: connection,
+                            isOpen: model.openConnections.contains(connection.id),
                             failed: model.failedConnections.contains(connection.id)
                         )
                         .mailSelection(connection.id == model.selectedConnectionID) {
                             model.selectedConnectionID = connection.id
                             focused = true
                         }
+                        .contextMenu { menu(for: connection) }
                     }
                 } header: {
                     Text(group.group)
@@ -28,6 +30,20 @@ struct ConnectionsSidebar: View {
         .listStyle(.sidebar)
         .arrowKeySelection(ids: visibleIDs, selected: model.selectedConnectionID, focus: $focused) {
             model.selectedConnectionID = $0
+        }
+    }
+
+    @ViewBuilder
+    private func menu(for connection: ConnectionConfig) -> some View {
+        if model.openConnections.contains(connection.id) {
+            Button("Disconnect") { Task { await model.disconnect(connection) } }
+        } else {
+            Button("Connect") { Task { await model.connect(connection) } }
+        }
+        Divider()
+        Button("New SQL Script") {
+            model.selectedConnectionID = connection.id
+            model.newScript()
         }
     }
 
@@ -47,6 +63,7 @@ struct ConnectionsSidebar: View {
 
 private struct ConnectionRow: View {
     let connection: ConnectionConfig
+    let isOpen: Bool
     let failed: Bool
 
     var body: some View {
@@ -58,12 +75,19 @@ private struct ConnectionRow: View {
                     Image(systemName: "exclamationmark.triangle")
                         .foregroundStyle(.secondary)
                         .help("Could not connect")
+                } else if isOpen {
+                    Circle()
+                        .fill(.green)
+                        .frame(width: 7, height: 7)
+                        .padding(.trailing, 4)
+                        .help("Connected")
                 }
             }
         } icon: {
             Image(systemName: connection.kind.symbolName)
         }
         .help(connection.summary)
+        .accessibilityValue(failed ? "Connection failed" : isOpen ? "Connected" : "Not connected")
     }
 }
 

@@ -26,6 +26,10 @@ private let postgresEnabled = ProcessInfo.processInfo.environment["DBGUI_TEST_PO
 
     let affected = try await driver.execute("create temp table t (x int); insert into t values (1), (2)")
     #expect(affected.columns.isEmpty && affected.rowsAffected == 2)
+
+    #expect(await driver.isConnected())
+    await driver.disconnect()
+    #expect(await !driver.isConnected())
 }
 
 @Test(.enabled(if: postgresEnabled)) func cancelsRunningQuery() async throws {

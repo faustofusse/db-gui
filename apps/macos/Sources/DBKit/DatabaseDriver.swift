@@ -26,6 +26,8 @@ public protocol DatabaseDriver: Sendable {
     var config: ConnectionConfig { get }
     func connect() async throws
     func disconnect() async
+    /// Whether a server connection is open right now (false after the server drops it).
+    func isConnected() async -> Bool
     func listSchemas() async throws -> [Schema]
     func fetchRows(of table: TableInfo, limit: Int, offset: Int) async throws -> QueryResult
     func execute(_ sql: String) async throws -> QueryResult

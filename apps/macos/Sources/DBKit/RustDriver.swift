@@ -27,6 +27,10 @@ final class RustDriver: DatabaseDriver {
         await connection.disconnect()
     }
 
+    func isConnected() async -> Bool {
+        await connection.isConnected()
+    }
+
     func listSchemas() async throws -> [Schema] {
         try await bridged { try await connection.listSchemas() }.map(Schema.init)
     }

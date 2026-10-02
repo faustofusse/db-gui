@@ -1,6 +1,7 @@
 //! Hardcoded sample connections, schemas and data so frontends can be built before real drivers exist.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -214,11 +215,12 @@ fn value(column: &ColumnInfo, i: u64) -> Value {
 
 pub struct MockDriver {
     config: ConnectionConfig,
+    connected: AtomicBool,
 }
 
 impl MockDriver {
     pub fn new(config: ConnectionConfig) -> Self {
-        Self { config }
+        Self { config, connected: AtomicBool::new(false) }
     }
 
     async fn latency() {
@@ -250,10 +252,17 @@ impl Driver for MockDriver {
                 self.config.host
             )));
         }
+        self.connected.store(true, Ordering::Relaxed);
         Ok(())
     }
 
-    async fn disconnect(&self) {}
+    async fn disconnect(&self) {
+        self.connected.store(false, Ordering::Relaxed);
+    }
+
+    async fn is_connected(&self) -> bool {
+        self.connected.load(Ordering::Relaxed)
+    }
 
     async fn list_schemas(&self) -> Result<Vec<Schema>> {
         self.connect().await?;
@@ -275,7 +284,7 @@ impl Driver for MockDriver {
     }
 
     async fn fetch_rows(&self, table: &TableInfo, limit: u32, offset: u64) -> Result<QueryResult> {
-        Self::latency().await;
+        self.connect().await?;
         let (_, spec) = self
             .find(Some(&table.schema), &table.name)
             .ok_or_else(|| Error::TableNotFound(table.qualified_name()))?;
@@ -396,6 +405,16 @@ mod tests {
     fn rejects_unsupported_sql() {
         let err = block_on(app_dev().execute("delete from users".into())).unwrap_err();
         assert!(matches!(err, Error::Unsupported(_)));
+    }
+
+    #[test]
+    fn tracks_connection_state() {
+        let conn = app_dev();
+        assert!(!block_on(conn.is_connected()));
+        block_on(conn.list_schemas()).unwrap();
+        assert!(block_on(conn.is_connected()));
+        block_on(conn.disconnect());
+        assert!(!block_on(conn.is_connected()));
     }
 
     #[test]

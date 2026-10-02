@@ -225,6 +225,33 @@ fn dropping_the_future_cancels_on_the_server() {
 }
 
 #[test]
+fn reports_and_closes_connections() {
+    if !enabled() {
+        return;
+    }
+    let conn = dev();
+    assert!(!block_on(conn.is_connected()));
+    block_on(conn.list_schemas()).unwrap();
+    assert!(block_on(conn.is_connected()));
+
+    // Disconnecting also stops a running script.
+    let started = Instant::now();
+    let (result, ()) = block_on(async {
+        tokio::join!(conn.execute("select pg_sleep(10)".into()), async {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            conn.disconnect().await;
+        })
+    });
+    assert!(result.is_err());
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert!(!block_on(conn.is_connected()));
+
+    // And the next call reconnects.
+    block_on(conn.list_schemas()).unwrap();
+    assert!(block_on(conn.is_connected()));
+}
+
+#[test]
 fn bad_credentials_and_unreachable_hosts_fail_to_connect() {
     if !enabled() {
         return;

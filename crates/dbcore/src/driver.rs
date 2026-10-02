@@ -28,7 +28,10 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 pub trait Driver: Send + Sync + 'static {
     fn config(&self) -> &ConnectionConfig;
     async fn connect(&self) -> Result<()>;
+    /// Closes server connections (cancelling a running `execute`). The next call reconnects.
     async fn disconnect(&self);
+    /// Whether a server connection is currently open (and not dropped by the server).
+    async fn is_connected(&self) -> bool;
     async fn list_schemas(&self) -> Result<Vec<Schema>>;
     async fn fetch_rows(&self, table: &TableInfo, limit: u32, offset: u64) -> Result<QueryResult>;
     async fn execute(&self, sql: &str) -> Result<QueryResult>;

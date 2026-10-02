@@ -60,6 +60,10 @@ impl Session {
         Ok(client)
     }
 
+    async fn is_open(&self) -> bool {
+        self.client.lock().await.as_ref().is_some_and(|c| !c.is_closed())
+    }
+
     /// Token for the current connection, if any (cancel needs no client lock).
     async fn cancel_token(&self) -> Option<CancelToken> {
         self.client.lock().await.as_ref().map(|c| c.cancel_token())
@@ -110,8 +114,14 @@ impl Driver for PostgresDriver {
     }
 
     async fn disconnect(&self) {
+        // A running script holds its own client handle; stop it so the connection really goes away.
+        self.cancel().await;
         self.browse.close().await;
         self.query.close().await;
+    }
+
+    async fn is_connected(&self) -> bool {
+        self.browse.is_open().await || self.query.is_open().await
     }
 
     async fn list_schemas(&self) -> Result<Vec<Schema>> {

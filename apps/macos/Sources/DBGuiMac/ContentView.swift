@@ -13,7 +13,8 @@ struct ContentView: View {
         } detail: {
             WorkspaceView()
         }
-
+        .separatorColoredSplitDividers()
+        .task { await model.monitorConnections() }
     }
 }
 

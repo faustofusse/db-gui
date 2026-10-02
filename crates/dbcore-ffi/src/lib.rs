@@ -127,6 +127,10 @@ impl Connection {
         self.inner.disconnect().await
     }
 
+    pub async fn is_connected(&self) -> bool {
+        self.inner.is_connected().await
+    }
+
     pub async fn list_schemas(&self) -> Result<Vec<Schema>, DbError> {
         Ok(self.inner.list_schemas().await?.into_iter().map(Into::into).collect())
     }

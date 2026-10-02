@@ -43,6 +43,10 @@ final class ScriptTab: Identifiable {
     var lastDuration: Duration?
     /// The last run was stopped by the user.
     var wasCancelled = false
+    /// Editor pane height once the user drags the divider; `nil` = half the available height.
+    var editorHeight: CGFloat?
+    /// New scripts focus the editor the first time they're shown.
+    var needsInitialFocus = true
     var search = ""
 
     init(connection: ConnectionConfig, title: String, text: String) {
@@ -95,11 +99,16 @@ enum WorkspaceTab: Identifiable {
 @MainActor
 final class AppModel {
     var connections: [ConnectionConfig] = Drivers.sampleConnections()
-    var selectedConnectionID: ConnectionConfig.ID?
+    var selectedConnectionID: ConnectionConfig.ID? {
+        // Show a spinner, not the previous connection's tables, until the new ones load.
+        didSet { if selectedConnectionID != oldValue { schemas = .loading } }
+    }
 
     var schemas: LoadState<[Schema]> = .idle
     /// Connections whose last attempt failed (shows a warning in the sidebar).
     var failedConnections: Set<ConnectionConfig.ID> = []
+    /// Connections with an open server connection (green dot in the sidebar).
+    var openConnections: Set<ConnectionConfig.ID> = []
 
     var tabs: [WorkspaceTab] = []
     var activeTabID: UUID?
@@ -166,6 +175,45 @@ final class AppModel {
         return d
     }
 
+    // MARK: Connection state
+
+    func connect(_ config: ConnectionConfig) async {
+        do {
+            try await driver(for: config).connect()
+            failedConnections.remove(config.id)
+            if config.id == selectedConnectionID, schemas.value == nil { await loadSchemas() }
+        } catch {
+            failedConnections.insert(config.id)
+        }
+        await updateConnectionState(config.id)
+    }
+
+    /// Closes the server connection (stopping a running script) and puts the UI back the way it is
+    /// at launch for that connection: its tabs close and, if selected, nothing is selected.
+    func disconnect(_ config: ConnectionConfig) async {
+        guard let driver = drivers[config.id] else { return }
+        await driver.disconnect()
+        tabs.filter { $0.connection.id == config.id }.forEach { close($0.id) }
+        if config.id == selectedConnectionID {
+            selectedConnectionID = nil
+            schemas = .idle
+        }
+        await updateConnectionState(config.id)
+    }
+
+    func updateConnectionState(_ id: ConnectionConfig.ID) async {
+        let open = await drivers[id]?.isConnected() ?? false
+        if open { openConnections.insert(id) } else { openConnections.remove(id) }
+    }
+
+    /// Notices connections the server closed. Cheap: only asks drivers that exist, no network I/O.
+    func monitorConnections() async {
+        while !Task.isCancelled {
+            for id in drivers.keys { await updateConnectionState(id) }
+            try? await Task.sleep(for: .seconds(3))
+        }
+    }
+
     // MARK: Schemas
 
     func loadSchemas() async {
@@ -181,6 +229,7 @@ final class AppModel {
             failedConnections.insert(config.id)
             schemas = .failed(error.localizedDescription)
         }
+        await updateConnectionState(config.id)
     }
 
     // MARK: Tabs
@@ -290,6 +339,7 @@ final class AppModel {
         } catch {
             tab.data = .failed(error.localizedDescription)
         }
+        await updateConnectionState(tab.connection.id)
     }
 
     func run(_ tab: ScriptTab) async {
@@ -310,6 +360,7 @@ final class AppModel {
             tab.lastDuration = clock.now - start
             tab.result = .failed(error.localizedDescription)
         }
+        await updateConnectionState(tab.connection.id)
     }
 
     /// Stops the script running in `tab` (server-side cancel).
