@@ -12,7 +12,13 @@ struct TableTabView: View {
         case .data:
             VStack(spacing: 0) {
                 FilterBar(tab: tab)
+                if !tab.edits.isEmpty {
+                    PendingChangesBar(tab: tab)
+                }
                 rows.frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            .sheet(isPresented: Binding(get: { tab.isReviewingEdits }, set: { tab.isReviewingEdits = $0 })) {
+                ReviewChangesSheet(tab: tab)
             }
         case .structure:
             StructureView(tab: tab)
@@ -42,16 +48,152 @@ struct TableTabView: View {
             .safeAreaInset(edge: .bottom, spacing: 0) { BottomBar { ModePicker(tab: tab); Spacer() } }
         case .loaded(let result):
             DataGrid(
-                result: result, search: tab.search, version: tab.generation,
+                result: result, search: tab.search, version: tab.dataVersion,
                 paging: GridPaging(
                     hasMore: !tab.reachedEnd, isLoading: tab.isLoadingMore, error: tab.loadMoreError,
                     loadMore: { Task { await model.loadMore(tab) } },
                     retry: { model.retryLoadMore(tab) }
                 ),
                 sorting: GridSorting(keys: tab.sort) { model.toggleSort(tab, column: $0) },
+                editing: tab.readOnlyReason == nil ? editing : nil,
                 isReloading: tab.isReloading,
-                statusLeading: AnyView(ModePicker(tab: tab))
+                statusLeading: AnyView(HStack(spacing: 6) {
+                    ModePicker(tab: tab)
+                    RowButtons(tab: tab)
+                })
             )
+        }
+    }
+
+    private var editing: GridEditing {
+        GridEditing(
+            edits: tab.edits,
+            editRequest: tab.editRequest,
+            setCell: { model.setCell(tab, row: $0, column: $1, to: $2) },
+            addRow: { model.addRow(tab) },
+            deleteRows: { model.deleteRows(tab, ids: $0) },
+            revertRows: { model.revertRows(tab, ids: $0) },
+            selectionChanged: { tab.selectedRowIDs = $0 },
+            requestHandled: { tab.editRequest = nil }
+        )
+    }
+}
+
+// MARK: - Editing
+
+/// `+` / `−` next to the mode switch, or a lock saying why the rows are read-only.
+private struct RowButtons: View {
+    @Environment(AppModel.self) private var model
+    let tab: TableTab
+
+    var body: some View {
+        if let reason = tab.readOnlyReason {
+            Image(systemName: "lock")
+                .foregroundStyle(.tertiary)
+                .help("Read-only: \(reason)")
+                .padding(.trailing, 4)
+        } else {
+            HStack(spacing: 2) {
+                Button { model.addRow(tab) } label: { Image(systemName: "plus").frame(width: 18, height: 18) }
+                    .help("Add Row")
+                Button { model.deleteRows(tab, ids: tab.selectedRowIDs) } label: {
+                    Image(systemName: "minus").frame(width: 18, height: 18)
+                }
+                .disabled(tab.selectedRowIDs.isEmpty)
+                .help("Delete Selected Rows (⌫)")
+            }
+            .buttonStyle(.borderless)
+            .padding(.trailing, 4)
+        }
+    }
+}
+
+/// Shown while a tab has unsaved edits: what changed, Discard, and Save (⌘S → review).
+private struct PendingChangesBar: View {
+    @Environment(AppModel.self) private var model
+    let tab: TableTab
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "pencil.circle.fill").foregroundStyle(.orange)
+            Text(tab.edits.summary).monospacedDigit()
+            Text("Not saved yet").foregroundStyle(.secondary)
+            Spacer()
+            Button("Discard") { model.discardEdits(tab) }
+            Button("Review & Save…") { model.reviewEdits(tab) }
+                .buttonStyle(.borderedProminent)
+                .help("Review the SQL, then save in one transaction (⌘S)")
+        }
+        .controlSize(.small)
+        .font(.callout)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(Color.orange.opacity(0.08))
+        .overlay(alignment: .bottom) { Divider() }
+    }
+}
+
+/// The exact statements that will run, and Save. Errors keep the sheet (and the edits) open.
+private struct ReviewChangesSheet: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
+    let tab: TableTab
+    @State private var statements: [EditStatement] = []
+    @State private var error: String?
+    @State private var saving = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Save Changes to “\(tab.table.name)”?").font(.headline)
+                Text("\(tab.edits.summary). These statements run in one transaction: if any fails, or a row changed since it was loaded, nothing is saved.")
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            ScrollView {
+                DDLView(sql: statements.map(\.sql).joined(separator: "\n"), fontSize: 12)
+            }
+            .frame(minHeight: 80, maxHeight: 320)
+            if let error {
+                Label {
+                    Text(error).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                } icon: {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
+                }
+                .font(.callout)
+            }
+            HStack {
+                if saving { ProgressView().controlSize(.small) }
+                Spacer()
+                Button("Cancel", role: .cancel) { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button("Save") { save() }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(saving || statements.isEmpty)
+            }
+        }
+        .padding(20)
+        .frame(width: 640)
+        .task {
+            do {
+                statements = try model.previewEdits(tab)
+            } catch {
+                self.error = error.localizedDescription
+            }
+        }
+    }
+
+    private func save() {
+        saving = true
+        error = nil
+        Task {
+            do {
+                try await model.saveEdits(tab)
+                dismiss()
+            } catch {
+                self.error = error.localizedDescription
+            }
+            saving = false
         }
     }
 }

@@ -17,6 +17,7 @@ use rusqlite::{Batch, ErrorCode, InterruptHandle, OpenFlags, OptionalExtension};
 
 use crate::dialect::{hex_preview, line_column, Dialect};
 use crate::driver::{Driver, Error, Result};
+use crate::edit::{self, EditStatement};
 use crate::model::*;
 
 const SQLITE: Dialect = Dialect(DatabaseKind::Sqlite);
@@ -149,6 +150,12 @@ impl Driver for SqliteDriver {
         let result = self.run(&self.query, move |conn| run_script(conn, &sql, max_rows)).await;
         guard.disarm();
         result
+    }
+
+    async fn apply(&self, statements: &[EditStatement]) -> Result<u64> {
+        // The browse connection is used exclusively while this runs, so nothing else joins the transaction.
+        let statements = statements.to_vec();
+        self.run(&self.browse, move |conn| apply(conn, &statements)).await
     }
 
     async fn cancel(&self) {
@@ -325,6 +332,32 @@ fn fetch_rows(conn: &rusqlite::Connection, table: &TableInfo, query: &RowQuery, 
         result.total_count = Some(count(conn, &SQLITE.count_query(&relation, filter))?);
     }
     Ok(result)
+}
+
+// MARK: Editing
+
+fn apply(conn: &rusqlite::Connection, statements: &[EditStatement]) -> Result<u64> {
+    // `immediate` takes the write lock now, so a busy database fails before anything runs.
+    conn.execute_batch("begin immediate").map_err(|e| query_error(e, None))?;
+    let mut total = 0;
+    for statement in statements {
+        let result = match conn.execute(&statement.sql, []) {
+            Ok(affected) => edit::check_affected(statement, affected as u64).map(|()| affected as u64),
+            Err(e) => Err(edit::failed(statement, query_error(e, None))),
+        };
+        match result {
+            Ok(affected) => total += affected,
+            Err(e) => {
+                let _ = conn.execute_batch("rollback");
+                return Err(e);
+            }
+        }
+    }
+    conn.execute_batch("commit").map_err(|e| {
+        let _ = conn.execute_batch("rollback");
+        query_error(e, None)
+    })?;
+    Ok(total)
 }
 
 // MARK: Structure

@@ -20,6 +20,7 @@ use tokio_postgres_rustls::MakeRustlsConnect;
 
 use crate::dialect::{error_chain, line_column, Dialect};
 use crate::driver::{Driver, Error, Result};
+use crate::edit::{self, EditStatement};
 use crate::model::*;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -32,11 +33,15 @@ pub struct PostgresDriver {
     browse: Session,
     /// User scripts: a long query here doesn't block browsing, and `cancel` only hits scripts.
     query: Session,
+    /// Saving row edits: its transaction never mixes with browsing or a script's own transaction.
+    edit: Session,
+    /// One save at a time on `edit`.
+    applying: Mutex<()>,
 }
 
 impl PostgresDriver {
     pub fn new(config: ConnectionConfig) -> Self {
-        Self { config, browse: Session::default(), query: Session::default() }
+        Self { config, browse: Session::default(), query: Session::default(), edit: Session::default(), applying: Mutex::new(()) }
     }
 
     async fn browse_client(&self) -> Result<Arc<Client>> {
@@ -119,6 +124,7 @@ impl Driver for PostgresDriver {
         self.cancel().await;
         self.browse.close().await;
         self.query.close().await;
+        self.edit.close().await;
     }
 
     async fn is_connected(&self) -> bool {
@@ -283,6 +289,36 @@ impl Driver for PostgresDriver {
         let result = run_script(&client, sql, max_rows).await;
         guard.disarm();
         result
+    }
+
+    async fn apply(&self, statements: &[EditStatement]) -> Result<u64> {
+        let _one_at_a_time = self.applying.lock().await;
+        let client = self.edit.client(&self.config).await?;
+        // `rollback` first: a save abandoned midway (its future dropped) must never be committed later.
+        client.batch_execute("rollback; begin").await.map_err(|e| query_error(&e, None))?;
+        let mut total = 0;
+        for statement in statements {
+            let result = match client.execute(statement.sql.as_str(), &[]).await {
+                Ok(affected) => edit::check_affected(statement, affected).map(|()| affected),
+                Err(e) => Err(edit::failed(statement, query_error(&e, None))),
+            };
+            match result {
+                Ok(affected) => total += affected,
+                Err(e) => {
+                    let _ = client.batch_execute("rollback").await;
+                    return Err(e);
+                }
+            }
+        }
+        // Deferred constraints are checked here.
+        if let Err(e) = client.batch_execute("commit").await {
+            let _ = client.batch_execute("rollback").await;
+            return Err(match query_error(&e, None) {
+                Error::Query(m) => Error::Query(format!("Couldn’t save:\n{m}\nNothing was saved.")),
+                other => other,
+            });
+        }
+        Ok(total)
     }
 
     async fn cancel(&self) {

@@ -3,6 +3,7 @@
 
 use std::time::{Duration, Instant};
 
+use dbcore::edit::{CellEdit, EditValue, KeyValue, RowChange};
 use dbcore::{mock, Connection, ConnectionConfig, Error, RowQuery, SortKey, SslMode, TableInfo, TableKind, Value};
 
 fn enabled() -> bool {
@@ -264,4 +265,82 @@ fn describes_tables_and_views() {
     let view = block_on(dev().describe_table(TableInfo::new("shop", "paid_orders"))).unwrap();
     assert!(view.ddl.unwrap().contains("VIEW `shop`.`paid_orders` AS"));
     assert!(matches!(block_on(dev().describe_table(TableInfo::new("shop", "nope"))), Err(Error::TableNotFound(_))));
+}
+
+// MARK: Editing
+
+fn edit_key(id: i64) -> Vec<KeyValue> {
+    vec![KeyValue { column: "id".into(), value: Value::Int(id) }]
+}
+
+fn edit_set(column: &str, value: EditValue) -> CellEdit {
+    CellEdit { column: column.into(), value }
+}
+
+fn edit_text(s: &str) -> EditValue {
+    EditValue::Text(s.into())
+}
+
+/// Saves, conflicts and rollbacks against a scratch table `table` with rows (1 a) (2 b) (3 c).
+fn exercise_edits(conn: &Connection, table: TableInfo) {
+    let names = |conn: &Connection| -> Vec<String> {
+        let page = block_on(conn.fetch_rows(table.clone(), 100, 0)).unwrap();
+        column(&page, "name").iter().map(|v| v.display()).collect()
+    };
+    let columns = block_on(conn.fetch_rows(table.clone(), 1, 0)).unwrap().columns;
+    let apply = |changes: Vec<RowChange>| block_on(conn.apply_changes(table.clone(), columns.clone(), changes));
+
+    // Update + delete + insert in one transaction; booleans typed as text work everywhere.
+    let affected = apply(vec![
+        RowChange::Update { key: edit_key(1), set: vec![edit_set("name", edit_text("Ada")), edit_set("n", EditValue::Null), edit_set("active", edit_text("false"))] },
+        RowChange::Delete { key: edit_key(2) },
+        RowChange::Insert { values: vec![edit_set("id", EditValue::Default), edit_set("name", edit_text("Grace")), edit_set("n", edit_text("7"))] },
+    ])
+    .unwrap();
+    assert_eq!(affected, 3);
+    assert_eq!(names(conn), ["Ada", "c", "Grace"]);
+    let page = block_on(conn.fetch_rows(table.clone(), 100, 0)).unwrap();
+    assert_eq!(column(&page, "n")[0], &Value::Null);
+    assert_eq!(column(&page, "n")[2].display(), "7");
+    assert_eq!(column(&page, "note")[2].display(), "hi", "defaults fill omitted columns");
+    assert!(matches!(column(&page, "active")[0], Value::Bool(false) | Value::Int(0)), "{:?}", column(&page, "active")[0]);
+
+    // Writing the value a cell already has still counts as matching its row.
+    assert_eq!(apply(vec![RowChange::Update { key: edit_key(3), set: vec![edit_set("name", edit_text("c"))] }]).unwrap(), 1);
+
+    // A vanished row fails the whole batch: the other update is rolled back too.
+    let err = apply(vec![
+        RowChange::Update { key: edit_key(3), set: vec![edit_set("name", edit_text("changed"))] },
+        RowChange::Update { key: edit_key(2), set: vec![edit_set("name", edit_text("ghost"))] },
+    ])
+    .unwrap_err();
+    assert!(matches!(&err, Error::Query(m) if m.contains("No row matches") && m.contains("Nothing was saved")), "{err:?}");
+    assert_eq!(names(conn), ["Ada", "c", "Grace"]);
+
+    // Server errors (bad value, unique violation) name the row and roll everything back.
+    let err = apply(vec![
+        RowChange::Update { key: edit_key(3), set: vec![edit_set("name", edit_text("changed"))] },
+        RowChange::Insert { values: vec![edit_set("name", edit_text("Ada"))] },
+    ])
+    .unwrap_err();
+    assert!(matches!(&err, Error::Query(m) if m.starts_with("Couldn’t save a new row") && m.ends_with("Nothing was saved.")), "{err:?}");
+    assert_eq!(names(conn), ["Ada", "c", "Grace"]);
+}
+
+#[test]
+fn saves_row_edits_in_one_transaction() {
+    if !enabled() {
+        return;
+    }
+    let conn = dev();
+    block_on(conn.execute(
+        "drop table if exists archive.dbear_edit_test;
+         create table archive.dbear_edit_test (
+           id int auto_increment primary key, name varchar(50) not null unique,
+           n int, active boolean not null default true, note varchar(20) default 'hi');
+         insert into archive.dbear_edit_test (id, name, n) values (1, 'a', 1), (2, 'b', 2), (3, 'c', 3);".into(),
+    ))
+    .unwrap();
+    exercise_edits(&conn, TableInfo::new("archive", "dbear_edit_test"));
+    block_on(conn.execute("drop table archive.dbear_edit_test".into())).unwrap();
 }

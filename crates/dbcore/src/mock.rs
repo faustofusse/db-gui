@@ -447,6 +447,10 @@ impl Driver for MockDriver {
         })
     }
 
+    async fn apply(&self, _statements: &[crate::edit::EditStatement]) -> Result<u64> {
+        Err(Error::Unsupported("sample data is read-only: edit a real database".into()))
+    }
+
     /// Understands just enough SQL to be useful for UI work:
     /// `SELECT * | col, col FROM [schema.]table [LIMIT n]`.
     async fn execute(&self, sql: &str, max_rows: Option<u32>) -> Result<QueryResult> {

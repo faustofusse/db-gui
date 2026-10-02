@@ -164,3 +164,42 @@ private let sqliteSeeded = FileManager.default.fileExists(atPath: Drivers.sample
     #expect(structure.ddl?.hasPrefix("CREATE TABLE \"public\".\"orders\"") == true)
     await driver.disconnect()
 }
+
+@Test func previewsEditsThroughFFIAndMockIsReadOnly() async throws {
+    let driver = Drivers.make(for: appDev)
+    let users = TableInfo(schema: "public", name: "users")
+    let columns = try await driver.fetchRows(of: users, limit: 1, offset: 0).columns
+    let changes: [RowChange] = [
+        .update(key: [KeyValue(column: "id", value: .int(1))], set: [CellEdit(column: "name", value: .text("O'Neil"))]),
+        .delete(key: [KeyValue(column: "id", value: .int(2))]),
+    ]
+    let statements = try driver.previewChanges(of: users, columns: columns, changes: changes)
+    #expect(statements.map(\.sql) == [
+        #"DELETE FROM "public"."users" WHERE "id" = 2;"#,
+        #"UPDATE "public"."users" SET "name" = 'O''Neil' WHERE "id" = 1;"#,
+    ])
+    await #expect(throws: DatabaseError.self) {
+        try await driver.applyChanges(to: users, columns: columns, changes: changes)
+    }
+}
+
+@Test(.enabled(if: postgresEnabled)) func realPostgresSavesEdits() async throws {
+    // The `postgres` database: app_dev's tables are asserted on by other tests.
+    let driver = Drivers.make(for: devDB.withDatabase("postgres"))
+    _ = try await driver.execute("""
+        drop table if exists public.dbear_swift_edit;
+        create table public.dbear_swift_edit (id int primary key, name text not null);
+        insert into public.dbear_swift_edit values (1, 'a'), (2, 'b');
+        """)
+    let table = TableInfo(schema: "public", name: "dbear_swift_edit")
+    let columns = try await driver.fetchRows(of: table, limit: 1, offset: 0).columns
+    let affected = try await driver.applyChanges(to: table, columns: columns, changes: [
+        .update(key: [KeyValue(column: "id", value: .int(1))], set: [CellEdit(column: "name", value: .text("Ada"))]),
+        .insert(values: [CellEdit(column: "id", value: .text("3")), CellEdit(column: "name", value: .text("c"))]),
+    ])
+    #expect(affected == 2)
+    let rows = try await driver.fetchRows(of: table, limit: 10, offset: 0).rows.map { $0.values[1] }
+    #expect(rows == [.text("Ada"), .text("b"), .text("c")])
+    _ = try await driver.execute("drop table public.dbear_swift_edit")
+    await driver.disconnect()
+}

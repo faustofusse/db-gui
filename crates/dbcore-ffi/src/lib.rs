@@ -77,7 +77,7 @@ pub struct TableColumns {
     pub columns: Vec<ColumnInfo>,
 }
 
-#[derive(uniffi::Enum)]
+#[derive(uniffi::Enum, Clone)]
 pub enum Value {
     Null,
     Bool(bool),
@@ -137,6 +137,40 @@ pub struct TableStructure {
     pub indexes: Vec<IndexInfo>,
     pub foreign_keys: Vec<ForeignKeyInfo>,
     pub ddl: Option<String>,
+}
+
+/// A new cell value (see `dbcore::edit`).
+#[derive(uniffi::Enum, Clone)]
+pub enum EditValue {
+    Null,
+    Default,
+    Text { text: String },
+}
+
+#[derive(uniffi::Record, Clone)]
+pub struct CellEdit {
+    pub column: String,
+    pub value: EditValue,
+}
+
+#[derive(uniffi::Record, Clone)]
+pub struct KeyValue {
+    pub column: String,
+    pub value: Value,
+}
+
+#[derive(uniffi::Enum, Clone)]
+pub enum RowChange {
+    Update { key: Vec<KeyValue>, set: Vec<CellEdit> },
+    Insert { values: Vec<CellEdit> },
+    Delete { key: Vec<KeyValue> },
+}
+
+#[derive(uniffi::Record)]
+pub struct EditStatement {
+    pub sql: String,
+    pub expect_one_row: bool,
+    pub target: String,
 }
 
 #[derive(uniffi::Record)]
@@ -214,6 +248,20 @@ impl Connection {
     /// One page of a table, sorted and filtered by `query`.
     pub async fn fetch_rows(&self, table: TableInfo, query: RowQuery, limit: u32, offset: u64) -> Result<QueryResult, DbError> {
         Ok(self.inner.fetch_rows_with(table.into(), query.into(), limit, offset).await?.into())
+    }
+
+    /// The statements `apply_changes` would run, in order (for the review sheet).
+    pub fn preview_changes(&self, table: TableInfo, columns: Vec<ColumnInfo>, changes: Vec<RowChange>) -> Result<Vec<EditStatement>, DbError> {
+        let columns: Vec<dbcore::ColumnInfo> = columns.into_iter().map(Into::into).collect();
+        let changes: Vec<dbcore::edit::RowChange> = changes.into_iter().map(Into::into).collect();
+        Ok(self.inner.preview_changes(&table.into(), &columns, &changes)?.into_iter().map(Into::into).collect())
+    }
+
+    /// Saves row edits in one transaction (all or nothing). Returns the rows affected.
+    pub async fn apply_changes(&self, table: TableInfo, columns: Vec<ColumnInfo>, changes: Vec<RowChange>) -> Result<u64, DbError> {
+        let columns = columns.into_iter().map(Into::into).collect();
+        let changes = changes.into_iter().map(Into::into).collect();
+        Ok(self.inner.apply_changes(table.into(), columns, changes).await?)
     }
 
     /// Columns, keys, indexes, foreign keys and DDL of a table or view.
@@ -327,6 +375,12 @@ pub fn default_connection_name(config: ConnectionConfig) -> String {
 #[uniffi::export]
 pub fn connection_summary(config: ConnectionConfig) -> String {
     dbcore::ConnectionConfig::from(config).summary()
+}
+
+/// Binary columns show a hex preview in the grid, so their cells can't be edited.
+#[uniffi::export]
+pub fn is_binary_column(column: ColumnInfo) -> bool {
+    dbcore::edit::is_binary(&column.into())
 }
 
 #[uniffi::export]
@@ -723,6 +777,54 @@ impl From<dbcore::TableStructure> for TableStructure {
                 .collect(),
             ddl: s.ddl,
         }
+    }
+}
+
+impl From<Value> for dbcore::Value {
+    fn from(v: Value) -> Self {
+        match v {
+            Value::Null => Self::Null,
+            Value::Bool(b) => Self::Bool(b),
+            Value::Int(i) => Self::Int(i),
+            Value::Float(f) => Self::Float(f),
+            Value::Decimal(s) => Self::Decimal(s),
+            Value::Text(s) => Self::Text(s),
+        }
+    }
+}
+
+impl From<CellEdit> for dbcore::edit::CellEdit {
+    fn from(e: CellEdit) -> Self {
+        let value = match e.value {
+            EditValue::Null => dbcore::edit::EditValue::Null,
+            EditValue::Default => dbcore::edit::EditValue::Default,
+            EditValue::Text { text } => dbcore::edit::EditValue::Text(text),
+        };
+        Self { column: e.column, value }
+    }
+}
+
+impl From<KeyValue> for dbcore::edit::KeyValue {
+    fn from(k: KeyValue) -> Self {
+        Self { column: k.column, value: k.value.into() }
+    }
+}
+
+impl From<RowChange> for dbcore::edit::RowChange {
+    fn from(c: RowChange) -> Self {
+        let keys = |key: Vec<KeyValue>| key.into_iter().map(Into::into).collect();
+        let edits = |set: Vec<CellEdit>| set.into_iter().map(Into::into).collect();
+        match c {
+            RowChange::Update { key, set } => Self::Update { key: keys(key), set: edits(set) },
+            RowChange::Insert { values } => Self::Insert { values: edits(values) },
+            RowChange::Delete { key } => Self::Delete { key: keys(key) },
+        }
+    }
+}
+
+impl From<dbcore::edit::EditStatement> for EditStatement {
+    fn from(s: dbcore::edit::EditStatement) -> Self {
+        Self { sql: s.sql, expect_one_row: s.expect_one_row, target: s.target }
     }
 }
 

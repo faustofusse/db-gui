@@ -9,6 +9,7 @@ mod connection;
 pub mod complete;
 pub mod dialect;
 pub mod driver;
+pub mod edit;
 pub mod highlight;
 pub mod import;
 pub mod mock;

@@ -18,6 +18,7 @@ use tokio::sync::{Mutex, MutexGuard};
 
 use crate::dialect::{error_chain, hex_preview, Dialect};
 use crate::driver::{Driver, Error, Result};
+use crate::edit::{self, EditStatement};
 use crate::model::*;
 
 const MYSQL: Dialect = Dialect(DatabaseKind::Mysql);
@@ -37,6 +38,9 @@ pub struct MysqlDriver {
     browse: Session,
     /// User scripts: a long query doesn't block browsing, and `cancel` only hits scripts.
     query: Session,
+    /// Saving row edits, in a transaction of its own. Reports *matched* rows (`CLIENT_FOUND_ROWS`):
+    /// an UPDATE that writes the value a cell already has still matched its row.
+    edit: Session,
     /// Set by `cancel`, so an interrupted script reports "cancelled" even when the server
     /// just ends it early (e.g. `sleep()` returns 1 instead of failing).
     cancelled: AtomicBool,
@@ -47,6 +51,8 @@ struct Session {
     conn: Mutex<Option<(Conn, Instant)>>,
     /// Server thread id of the open connection (0 = none), readable while a query holds `conn`.
     thread_id: AtomicU32,
+    /// Affected-row counts are rows matched, not rows changed.
+    found_rows: bool,
 }
 
 /// A locked, open session connection.
@@ -87,7 +93,7 @@ impl Session {
             }
         }
         if guard.is_none() {
-            let conn = connect(config).await?;
+            let conn = connect_with(config, self.found_rows).await?;
             self.thread_id.store(conn.id(), Ordering::Relaxed);
             *guard = Some((conn, Instant::now()));
         }
@@ -108,7 +114,13 @@ impl Session {
 
 impl MysqlDriver {
     pub fn new(config: ConnectionConfig) -> Self {
-        Self { config, browse: Session::default(), query: Session::default(), cancelled: AtomicBool::new(false) }
+        Self {
+            config,
+            browse: Session::default(),
+            query: Session::default(),
+            edit: Session { found_rows: true, ..Session::default() },
+            cancelled: AtomicBool::new(false),
+        }
     }
 
     /// Databases shown as schemas: all visible ones, or only the configured one.
@@ -118,7 +130,7 @@ impl MysqlDriver {
     }
 }
 
-fn opts(config: &ConnectionConfig, tls: Option<SslOpts>) -> Opts {
+fn opts(config: &ConnectionConfig, tls: Option<SslOpts>, found_rows: bool) -> Opts {
     let database = config.database.trim();
     OptsBuilder::default()
         .ip_or_hostname(config.host.trim())
@@ -129,12 +141,17 @@ fn opts(config: &ConnectionConfig, tls: Option<SslOpts>) -> Opts {
         // `localhost` would otherwise switch to the server's unix socket, which may not be ours (containers).
         .prefer_socket(false)
         .ssl_opts(tls)
+        .client_found_rows(found_rows)
         .into()
 }
 
 async fn connect(config: &ConnectionConfig) -> Result<Conn> {
+    connect_with(config, false).await
+}
+
+async fn connect_with(config: &ConnectionConfig, found_rows: bool) -> Result<Conn> {
     let attempt = |tls: Option<SslOpts>| async move {
-        match tokio::time::timeout(CONNECT_TIMEOUT, Conn::new(opts(config, tls))).await {
+        match tokio::time::timeout(CONNECT_TIMEOUT, Conn::new(opts(config, tls, found_rows))).await {
             Ok(result) => result,
             Err(_) => Err(mysql_async::Error::Other("timed out".into())),
         }
@@ -167,6 +184,7 @@ impl Driver for MysqlDriver {
         self.cancel().await;
         self.browse.close().await;
         self.query.close().await;
+        self.edit.close().await;
     }
 
     async fn is_connected(&self) -> bool {
@@ -295,6 +313,36 @@ impl Driver for MysqlDriver {
             Ok(result) => Ok(result),
             Err(e) => Err(query_error(&e)),
         }
+    }
+
+    async fn apply(&self, statements: &[EditStatement]) -> Result<u64> {
+        let mut lease = self.edit.lease(&self.config).await?;
+        // `rollback` first: a save abandoned midway (its future dropped) must never be committed later.
+        for sql in ["rollback", "start transaction"] {
+            let result = lease.conn().query_drop(sql).await;
+            lease.check(result).map_err(|e| query_error(&e))?;
+        }
+        let mut total = 0;
+        for statement in statements {
+            let result = lease.conn().query_drop(statement.sql.as_str()).await;
+            let result = match lease.check(result) {
+                Ok(()) => {
+                    let affected = lease.conn().affected_rows();
+                    edit::check_affected(statement, affected).map(|()| affected)
+                }
+                Err(e) => Err(edit::failed(statement, query_error(&e))),
+            };
+            match result {
+                Ok(affected) => total += affected,
+                Err(e) => {
+                    let _ = lease.conn().query_drop("rollback").await;
+                    return Err(e);
+                }
+            }
+        }
+        let result = lease.conn().query_drop("commit").await;
+        lease.check(result).map_err(|e| query_error(&e))?;
+        Ok(total)
     }
 
     async fn cancel(&self) {

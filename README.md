@@ -72,5 +72,12 @@ cargo test -p dbcore              # core (Postgres tests skip without a database
 - Structure (⌥⌘2) comes from `Driver::describe_table`: columns with defaults and comments, the
   primary key in key order, indexes, foreign keys and DDL. Postgres DDL is rebuilt from the
   catalogs; MySQL uses `SHOW CREATE TABLE` and SQLite `sqlite_master`.
+- Rows of tables with a primary key are editable: double-click or Return edits a cell, Tab moves to
+  the next one, "+" or ⌥⌘N adds a row, and ⌫ deletes rows. Edits stay pending until ⌘S, which shows the
+  exact SQL (`dbcore::edit::statements`) before running it. The driver runs it in one
+  transaction on a session of its own. It rolls back if any statement fails, or if an
+  UPDATE/DELETE doesn't match exactly one row (the row changed since it was loaded). Values
+  are sent as string literals and cast by the database. Views, keyless tables and binary
+  columns are read-only.
 - `bundle-mac.sh` signs with your "Apple Development" identity when you have one, so the
   Keychain's "Always Allow" survives rebuilds.

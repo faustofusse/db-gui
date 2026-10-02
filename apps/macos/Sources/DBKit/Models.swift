@@ -257,6 +257,52 @@ public enum DBValue: Hashable, Sendable {
     }
 }
 
+// MARK: - Editing
+
+/// A new cell value.
+public enum EditValue: Hashable, Sendable {
+    case null
+    /// The column's default: `DEFAULT` in an UPDATE, left out of an INSERT.
+    case `default`
+    /// Text as typed; the database converts it to the column's type.
+    case text(String)
+}
+
+public struct CellEdit: Hashable, Sendable {
+    public var column: String
+    public var value: EditValue
+
+    public init(column: String, value: EditValue) {
+        self.column = column
+        self.value = value
+    }
+}
+
+/// A primary key column and the row's current value in it.
+public struct KeyValue: Hashable, Sendable {
+    public var column: String
+    public var value: DBValue
+
+    public init(column: String, value: DBValue) {
+        self.column = column
+        self.value = value
+    }
+}
+
+public enum RowChange: Hashable, Sendable {
+    case update(key: [KeyValue], set: [CellEdit])
+    case insert(values: [CellEdit])
+    case delete(key: [KeyValue])
+}
+
+/// A statement that saving will run, as shown in the review sheet.
+public struct EditStatement: Hashable, Sendable {
+    public var sql: String
+    /// UPDATE/DELETE by primary key: must match exactly one row, or nothing is saved.
+    public var expectOneRow: Bool
+    public var target: String
+}
+
 public struct Row: Identifiable, Hashable, Sendable {
     public let id: Int
     public var values: [DBValue]

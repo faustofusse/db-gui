@@ -19,6 +19,48 @@ enum TableTabMode: Hashable {
     case data, structure
 }
 
+/// Unsaved changes in a table tab, saved together (⌘S). Rows are identified by their grid id
+/// (`Row.id`); new rows get negative ids and are shown above the loaded ones.
+struct PendingEdits: Equatable {
+    /// Row id → column index → new value.
+    var updates: [Int: [Int: EditValue]] = [:]
+    var deleted: Set<Int> = []
+    var inserted: [InsertedRow] = []
+
+    struct InsertedRow: Equatable, Identifiable {
+        let id: Int
+        /// One per column; `.default` until typed in.
+        var values: [EditValue]
+    }
+
+    var isEmpty: Bool { updates.isEmpty && deleted.isEmpty && inserted.isEmpty }
+    /// Updated rows that aren't also deleted.
+    var updatedRowCount: Int { updates.keys.filter { !deleted.contains($0) }.count }
+
+    /// "2 edited · 1 new · 1 deleted".
+    var summary: String {
+        var parts: [String] = []
+        if updatedRowCount > 0 { parts.append("\(updatedRowCount) edited") }
+        if !inserted.isEmpty { parts.append("\(inserted.count) new") }
+        if !deleted.isEmpty { parts.append("\(deleted.count) deleted") }
+        return parts.joined(separator: " · ")
+    }
+
+    func value(row id: Int, column: Int) -> EditValue? {
+        if id < 0 { return inserted.first { $0.id == id }?.values[safe: column] }
+        return updates[id]?[column]
+    }
+}
+
+extension Array {
+    subscript(safe index: Int) -> Element? { indices.contains(index) ? self[index] : nil }
+}
+
+struct CellAddress: Equatable {
+    var row: Int
+    var column: Int
+}
+
 @Observable
 @MainActor
 final class TableTab: Identifiable {
@@ -33,8 +75,11 @@ final class TableTab: Identifiable {
     var loadMoreError: String?
     /// The last page came back short: everything is loaded.
     var reachedEnd = false
-    /// Bumped on reload so pages from an older load are dropped.
+    /// Bumped when a load starts, so pages from an older load are dropped.
     var generation = 0
+    /// Bumped when a load's rows arrive: tells the grid its rows were replaced (not just appended to).
+    /// Not `generation`: rows stay on screen while reloading, so that changes before the new rows exist.
+    var dataVersion = 0
     /// Reloading (new sort or filter, refresh) while the previous rows stay on screen.
     var isReloading = false
     var search = ""
@@ -52,7 +97,27 @@ final class TableTab: Identifiable {
     /// Bumped to focus the filter field (⌥⌘F).
     var filterFocusRequest = 0
 
+    /// Unsaved cell edits, new and deleted rows.
+    var edits = PendingEdits()
+    /// Grid selection (row ids), for the delete button. Only tracked for editable tabs.
+    var selectedRowIDs: Set<Int> = []
+    /// Set to start editing a cell (e.g. the first cell of a new row); the grid clears it.
+    var editRequest: CellAddress?
+    /// Review sheet before saving.
+    var isReviewingEdits = false
+    var nextInsertedID = -1
+
     var query: RowQuery { RowQuery(sort: sort, filter: appliedFilter) }
+
+    /// Why the rows can't be edited, or `nil` if they can.
+    var readOnlyReason: String? {
+        if table.kind == .view { return "Views are read-only." }
+        guard let columns = data.value?.columns else { return "Loading…" }
+        if !columns.contains(where: \.isPrimaryKey) {
+            return "“\(table.name)” has no primary key, so its rows can’t be identified for editing."
+        }
+        return nil
+    }
     var canLoadMore: Bool { data.value != nil && !reachedEnd && !isLoadingMore && loadMoreError == nil && !isReloading }
     /// The typed filter differs from the one the rows were loaded with.
     var isFilterEdited: Bool { Self.normalized(filterText) != appliedFilter }
@@ -710,7 +775,9 @@ final class AppModel {
     func refreshActiveTab() async {
         switch activeTab {
         case .table(let t) where t.mode == .structure: await loadStructure(t)
-        case .table(let t): await load(t)
+        case .table(let t):
+            guard confirmDiscardingEdits(in: t) else { return }
+            await load(t)
         case .script(let s): await run(s)
         case nil: break
         }
@@ -719,6 +786,9 @@ final class AppModel {
     /// (Re)loads the first page of a table tab with its sort and filter. Rows already shown
     /// stay up while the new ones load, so re-sorting doesn't flash a spinner.
     func load(_ tab: TableTab) async {
+        // Edits point at loaded rows by position: new rows make them meaningless.
+        tab.edits = PendingEdits()
+        tab.selectedRowIDs = []
         tab.generation += 1
         let generation = tab.generation
         if tab.data.value == nil { tab.data = .loading }
@@ -732,6 +802,7 @@ final class AppModel {
                 of: tab.table, query: tab.query, limit: pageSize, offset: 0)
             guard generation == tab.generation else { return }
             tab.reachedEnd = page.rows.count < pageSize || page.totalCount.map { page.rows.count >= $0 } == true
+            tab.dataVersion += 1
             tab.data = .loaded(page)
         } catch {
             guard generation == tab.generation else { return }
@@ -761,6 +832,7 @@ final class AppModel {
 
     /// Header click: sort ascending, then descending, then back to the table's natural order.
     func toggleSort(_ tab: TableTab, column: String) {
+        guard confirmDiscardingEdits(in: tab) else { return }
         switch tab.sort.first {
         case let key? where key.column == column && !key.descending:
             tab.sort = [SortKey(column: column, descending: true)]
@@ -774,19 +846,21 @@ final class AppModel {
     }
 
     func clearSort(_ tab: TableTab) {
-        guard !tab.sort.isEmpty else { return }
+        guard !tab.sort.isEmpty, confirmDiscardingEdits(in: tab) else { return }
         tab.sort = []
         Task { await load(tab) }
     }
 
     /// Reloads with what's typed in the filter bar (Return).
     func applyFilter(_ tab: TableTab) {
+        guard confirmDiscardingEdits(in: tab) else { return }
         tab.appliedFilter = TableTab.normalized(tab.filterText)
         tab.isPreview = false
         Task { await load(tab) }
     }
 
     func clearFilter(_ tab: TableTab) {
+        guard tab.appliedFilter == nil || confirmDiscardingEdits(in: tab) else { return }
         tab.filterText = ""
         guard tab.appliedFilter != nil else { return }
         tab.appliedFilter = nil
@@ -817,6 +891,131 @@ final class AppModel {
         }
         let id = TableInfo(schema: foreignKey.referencedSchema, name: foreignKey.referencedTable).id
         openTable(table(withID: id) ?? TableInfo(schema: foreignKey.referencedSchema, name: foreignKey.referencedTable), pinned: true)
+    }
+
+    // MARK: Editing rows
+
+    /// Asks before throwing away unsaved edits (reload, re-sort, filter, close). True = go ahead.
+    func confirmDiscardingEdits(in tab: TableTab) -> Bool {
+        guard !tab.edits.isEmpty else { return true }
+        let alert = NSAlert()
+        alert.messageText = "Discard unsaved changes to “\(tab.table.name)”?"
+        alert.informativeText = "\(tab.edits.summary). Reloading the rows throws these away."
+        alert.addButton(withTitle: "Discard Changes")
+        alert.addButton(withTitle: "Cancel")
+        alert.buttons[0].hasDestructiveAction = true
+        guard alert.runModal() == .alertFirstButtonReturn else { return false }
+        tab.edits = PendingEdits()
+        return true
+    }
+
+    /// Stages a cell value. Typing a loaded cell's original value back drops the edit.
+    func setCell(_ tab: TableTab, row id: Int, column: Int, to value: EditValue) {
+        guard tab.readOnlyReason == nil, let result = tab.data.value, result.columns.indices.contains(column) else { return }
+        if id < 0 {
+            guard let index = tab.edits.inserted.firstIndex(where: { $0.id == id }) else { return }
+            tab.edits.inserted[index].values[column] = value
+        } else {
+            guard let original = result.rows[safe: id]?.values[safe: column] else { return }
+            var row = tab.edits.updates[id] ?? [:]
+            if Self.matches(value, original) { row[column] = nil } else { row[column] = value }
+            tab.edits.updates[id] = row.isEmpty ? nil : row
+        }
+        tab.isPreview = false
+    }
+
+    /// Typed text equal to what the cell shows (or NULL left blank) isn't a change.
+    private static func matches(_ value: EditValue, _ original: DBValue) -> Bool {
+        switch (value, original) {
+        case (.null, .null): true
+        case (.text(let t), let o): !o.isNull && t == o.displayString
+        default: false
+        }
+    }
+
+    /// A new row at the top of the grid, editing its first editable cell.
+    func addRow(_ tab: TableTab) {
+        guard tab.readOnlyReason == nil, let columns = tab.data.value?.columns else { return }
+        let id = tab.nextInsertedID
+        tab.nextInsertedID -= 1
+        tab.edits.inserted.append(.init(id: id, values: Array(repeating: .default, count: columns.count)))
+        tab.isPreview = false
+        let first = columns.firstIndex { !$0.isBinary && !($0.isPrimaryKey && columns.filter(\.isPrimaryKey).count == 1) }
+        tab.editRequest = CellAddress(row: id, column: first ?? 0)
+    }
+
+    /// New rows are dropped; loaded rows are marked for deletion.
+    func deleteRows(_ tab: TableTab, ids: Set<Int>) {
+        guard tab.readOnlyReason == nil, !ids.isEmpty else { return }
+        tab.edits.inserted.removeAll { ids.contains($0.id) }
+        tab.edits.deleted.formUnion(ids.filter { $0 >= 0 })
+        tab.isPreview = false
+    }
+
+    func revertRows(_ tab: TableTab, ids: Set<Int>) {
+        for id in ids {
+            tab.edits.updates[id] = nil
+            tab.edits.deleted.remove(id)
+        }
+        tab.edits.inserted.removeAll { ids.contains($0.id) }
+    }
+
+    /// Opens the review sheet. A cell still being edited is committed first (ending editing keeps
+    /// what was typed), so ⌘S right after typing includes that value.
+    func reviewEdits(_ tab: TableTab) {
+        NSApp.keyWindow?.makeFirstResponder(nil)
+        guard !tab.edits.isEmpty else { return }
+        tab.isReviewingEdits = true
+    }
+
+    func discardEdits(_ tab: TableTab) {
+        tab.edits = PendingEdits()
+        tab.isReviewingEdits = false
+    }
+
+    /// The pending edits as core changes, keyed by each row's primary key as loaded.
+    func changes(in tab: TableTab) -> [RowChange] {
+        guard let result = tab.data.value else { return [] }
+        let columns = result.columns
+        func key(_ id: Int) -> [KeyValue] {
+            guard let row = result.rows[safe: id] else { return [] }
+            return columns.indices.filter { columns[$0].isPrimaryKey }.map { KeyValue(column: columns[$0].name, value: row.values[$0]) }
+        }
+        let edits = tab.edits
+        var changes: [RowChange] = []
+        for id in edits.deleted.sorted() {
+            changes.append(.delete(key: key(id)))
+        }
+        for (id, cells) in edits.updates.sorted(by: { $0.key < $1.key }) where !edits.deleted.contains(id) {
+            let set = cells.sorted { $0.key < $1.key }.map { CellEdit(column: columns[$0.key].name, value: $0.value) }
+            changes.append(.update(key: key(id), set: set))
+        }
+        for row in edits.inserted {
+            changes.append(.insert(values: zip(columns, row.values).map { CellEdit(column: $0.name, value: $1) }))
+        }
+        return changes
+    }
+
+    func previewEdits(_ tab: TableTab) throws -> [EditStatement] {
+        guard let columns = tab.data.value?.columns else { return [] }
+        return try driver(for: tab.connection).previewChanges(of: tab.table, columns: columns, changes: changes(in: tab))
+    }
+
+    /// Saves every pending edit in one transaction, then reloads the rows. Throws (leaving the
+    /// edits in place) if anything fails: then nothing was saved.
+    func saveEdits(_ tab: TableTab) async throws {
+        guard let columns = tab.data.value?.columns, !tab.edits.isEmpty else { return }
+        let changes = changes(in: tab)
+        _ = try await driver(for: tab.connection).applyChanges(to: tab.table, columns: columns, changes: changes)
+        tab.edits = PendingEdits()
+        tab.isReviewingEdits = false
+        await load(tab)
+    }
+
+    /// Closing a tab from the UI asks first if it has unsaved edits.
+    func requestClose(_ id: UUID) {
+        if case .table(let t)? = tabs.first(where: { $0.id == id }), !confirmDiscardingEdits(in: t) { return }
+        close(id)
     }
 
     var activeTableTab: TableTab? {

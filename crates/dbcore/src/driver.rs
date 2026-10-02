@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 
+use crate::edit::EditStatement;
 use crate::model::{ConnectionConfig, QueryResult, RowQuery, Schema, TableColumns, TableInfo, TableStructure};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -57,4 +58,10 @@ pub trait Driver: Send + Sync + 'static {
     async fn execute(&self, sql: &str, max_rows: Option<u32>) -> Result<QueryResult>;
     /// Cancels the running `execute`, if any. It then fails with [`Error::Cancelled`].
     async fn cancel(&self) {}
+    /// Runs edit statements (see [`crate::edit`]) in one transaction on a session of their own:
+    /// all or nothing, checked with `edit::check_affected`. Returns the rows affected.
+    async fn apply(&self, statements: &[EditStatement]) -> Result<u64> {
+        let _ = statements;
+        Err(Error::Unsupported("this connection is read-only".into()))
+    }
 }

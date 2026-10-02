@@ -42,6 +42,10 @@ public protocol DatabaseDriver: Sendable {
     func fetchRows(of table: TableInfo, query: RowQuery, limit: Int, offset: Int) async throws -> QueryResult
     /// Columns, keys, indexes, foreign keys and DDL of a table or view.
     func describeTable(_ table: TableInfo) async throws -> TableStructure
+    /// The SQL `applyChanges` would run, in order. `columns` are the table's loaded columns.
+    func previewChanges(of table: TableInfo, columns: [ColumnInfo], changes: [RowChange]) throws -> [EditStatement]
+    /// Saves row edits in one transaction, all or nothing. Returns the rows affected.
+    func applyChanges(to table: TableInfo, columns: [ColumnInfo], changes: [RowChange]) async throws -> Int
     /// Runs a script keeping at most `maxRows` rows (nil = all); see `QueryResult.truncated`.
     func execute(_ sql: String, maxRows: Int?) async throws -> QueryResult
     /// Stops the running `execute`, which then throws `DatabaseError.cancelled`.

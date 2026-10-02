@@ -134,7 +134,7 @@ private struct TabItem: View {
             .padding(.horizontal, 26)
 
             HStack {
-                CloseButton { model.close(tab.id) }
+                CloseButton { model.requestClose(tab.id) }
                     .opacity(hovered ? 1 : 0)
                 Spacer(minLength: 0)
             }
@@ -166,7 +166,7 @@ private struct TabItem: View {
             if tab.isPreview {
                 Button("Keep Open") { model.pin(tab.id) }
             }
-            Button("Close Tab") { model.close(tab.id) }
+            Button("Close Tab") { model.requestClose(tab.id) }
             Button("Close Other Tabs") { model.closeOthers(than: tab.id) }
                 .disabled(model.tabs.count < 2)
         }

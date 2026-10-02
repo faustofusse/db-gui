@@ -8,7 +8,8 @@ use tokio::task::JoinHandle;
 
 use crate::driver::{Driver, Error, Result};
 use crate::dialect::normalize_filter;
-use crate::model::{ConnectionConfig, QueryResult, RowQuery, Schema, TableColumns, TableInfo, TableStructure};
+use crate::edit::{self, EditStatement, RowChange};
+use crate::model::{ColumnInfo, ConnectionConfig, QueryResult, RowQuery, Schema, TableColumns, TableInfo, TableStructure};
 use crate::mock::{self, MockDriver};
 use crate::model::DatabaseKind;
 use crate::mysql::MysqlDriver;
@@ -125,6 +126,22 @@ impl Connection {
         query.filter = normalize_filter(query.filter.as_deref())?;
         let d = self.driver.clone();
         on_runtime(async move { d.fetch_rows(&table, &query, limit, offset).await }).await
+    }
+
+    /// The SQL that `apply_changes` would run, for review (no connection needed).
+    pub fn preview_changes(&self, table: &TableInfo, columns: &[ColumnInfo], changes: &[RowChange]) -> Result<Vec<EditStatement>> {
+        edit::statements(self.config().kind, table, columns, changes)
+    }
+
+    /// Saves row edits in one transaction: either all of them or none. `columns` are the table's
+    /// columns as loaded (they carry the primary key). Returns the number of rows affected.
+    pub async fn apply_changes(&self, table: TableInfo, columns: Vec<ColumnInfo>, changes: Vec<RowChange>) -> Result<u64> {
+        let statements = self.preview_changes(&table, &columns, &changes)?;
+        if statements.is_empty() {
+            return Ok(0);
+        }
+        let d = self.driver.clone();
+        on_runtime(async move { d.apply(&statements).await }).await
     }
 
     pub async fn describe_table(&self, table: TableInfo) -> Result<TableStructure> {

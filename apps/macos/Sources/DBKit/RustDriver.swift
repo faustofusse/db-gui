@@ -52,6 +52,26 @@ final class RustDriver: DatabaseDriver {
         return QueryResult(page, firstRowID: offset)
     }
 
+    func previewChanges(of table: TableInfo, columns: [ColumnInfo], changes: [RowChange]) throws -> [EditStatement] {
+        do {
+            return try connection.previewChanges(
+                table: DBCoreFFI.TableInfo(table), columns: columns.map(DBCoreFFI.ColumnInfo.init),
+                changes: changes.map(DBCoreFFI.RowChange.init)
+            ).map { EditStatement(sql: $0.sql, expectOneRow: $0.expectOneRow, target: $0.target) }
+        } catch let error as DBCoreFFI.DbError {
+            throw DatabaseError(error)
+        }
+    }
+
+    func applyChanges(to table: TableInfo, columns: [ColumnInfo], changes: [RowChange]) async throws -> Int {
+        let affected = try await bridged {
+            try await connection.applyChanges(
+                table: DBCoreFFI.TableInfo(table), columns: columns.map(DBCoreFFI.ColumnInfo.init),
+                changes: changes.map(DBCoreFFI.RowChange.init))
+        }
+        return Int(clamping: affected)
+    }
+
     func describeTable(_ table: TableInfo) async throws -> TableStructure {
         TableStructure(try await bridged { try await connection.describeTable(table: DBCoreFFI.TableInfo(table)) })
     }
@@ -211,6 +231,47 @@ extension ColumnInfo {
 extension DBCoreFFI.ColumnInfo {
     init(_ c: ColumnInfo) {
         self.init(name: c.name, typeName: c.typeName, isPrimaryKey: c.isPrimaryKey, isNullable: c.isNullable)
+    }
+}
+
+extension ColumnInfo {
+    /// Binary columns are shown as a hex preview, so their cells can't be edited (decided by the core).
+    public var isBinary: Bool { DBCoreFFI.isBinaryColumn(column: DBCoreFFI.ColumnInfo(self)) }
+}
+
+extension DBCoreFFI.Value {
+    init(_ v: DBValue) {
+        switch v {
+        case .null: self = .null
+        case .bool(let b): self = .bool(b)
+        case .int(let i): self = .int(i)
+        case .double(let d): self = .float(d)
+        case .decimal(let s): self = .decimal(s)
+        case .text(let s): self = .text(s)
+        }
+    }
+}
+
+extension DBCoreFFI.RowChange {
+    init(_ change: RowChange) {
+        func keys(_ key: [KeyValue]) -> [DBCoreFFI.KeyValue] {
+            key.map { DBCoreFFI.KeyValue(column: $0.column, value: DBCoreFFI.Value($0.value)) }
+        }
+        func edits(_ set: [CellEdit]) -> [DBCoreFFI.CellEdit] {
+            set.map { edit in
+                let value: DBCoreFFI.EditValue = switch edit.value {
+                case .null: .null
+                case .default: .default
+                case .text(let text): .text(text: text)
+                }
+                return DBCoreFFI.CellEdit(column: edit.column, value: value)
+            }
+        }
+        switch change {
+        case .update(let key, let set): self = .update(key: keys(key), set: edits(set))
+        case .insert(let values): self = .insert(values: edits(values))
+        case .delete(let key): self = .delete(key: keys(key))
+        }
     }
 }
 
