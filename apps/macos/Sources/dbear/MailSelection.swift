@@ -6,17 +6,27 @@ struct MailSelectionRow: ViewModifier {
     let isSelected: Bool
     let action: () -> Void
 
+    /// The sidebar List hosts row content 6pt in from each side of the row cell, and
+    /// clicks there never reach SwiftUI. The highlight is inset to match, so every
+    /// visible part of a row is clickable.
+    private static let highlightInset: CGFloat = 10 + 6
+
     func body(content: Content) -> some View {
         content
             .labelStyle(MailRowLabelStyle())
             .foregroundStyle(isSelected ? AnyShapeStyle(.tint) : AnyShapeStyle(.primary))
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 4)
+            // Fill the row's full width and height (not just the text) so clicks anywhere
+            // in the row select it. Zero insets let the content take the full row height.
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
             .contentShape(Rectangle())
             .onTapGesture(perform: action)
+            .listRowInsets(EdgeInsets())
+            .accessibilityElement(children: .combine)
             .listRowBackground(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .fill(.primary.opacity(isSelected ? 0.1 : 0))
-                    .padding(.horizontal, 10)
+                    .padding(.horizontal, Self.highlightInset)
             )
             .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
     }
