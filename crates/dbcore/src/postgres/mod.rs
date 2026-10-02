@@ -95,7 +95,7 @@ async fn connect(config: &ConnectionConfig) -> Result<Client> {
     let (client, connection) = pg
         .connect(tls::connector(config.ssl_mode)?)
         .await
-        .map_err(|e| Error::ConnectionFailed(error_chain(&e)))?;
+        .map_err(|e| Error::ConnectionFailed(connect_error(&e)))?;
     tokio::spawn(async move {
         // Ends when the client is dropped or the server goes away; `is_closed` reports the latter.
         let _ = connection.await;
@@ -447,6 +447,17 @@ fn line_column(sql: &str, position: usize) -> (usize, usize) {
 }
 
 /// "error connecting to server: Connection refused (os error 61)" instead of just the top level.
+/// Server-reported startup errors (bad database, password…) without the "db error: FATAL:" noise.
+fn connect_error(e: &tokio_postgres::Error) -> String {
+    match e.as_db_error() {
+        Some(db) => match db.hint() {
+            Some(hint) => format!("{} ({hint})", db.message()),
+            None => db.message().to_string(),
+        },
+        None => error_chain(e),
+    }
+}
+
 fn error_chain(e: &(dyn std::error::Error + 'static)) -> String {
     let mut message = e.to_string();
     let mut source = e.source();

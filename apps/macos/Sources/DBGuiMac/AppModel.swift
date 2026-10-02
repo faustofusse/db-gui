@@ -95,10 +95,46 @@ enum WorkspaceTab: Identifiable {
 
 // MARK: - App model
 
+/// Opens the connection editor sheet; `original == nil` means a new connection.
+struct ConnectionEditorRequest: Identifiable {
+    let id = UUID()
+    let original: ConnectionConfig?
+}
+
+extension ConnectionConfig {
+    /// Anything besides name/group changed, so an open connection is stale.
+    func connectsDifferently(than other: ConnectionConfig) -> Bool {
+        (kind, host, port, database, user, sslMode) != (other.kind, other.host, other.port, other.database, other.user, other.sslMode)
+    }
+}
+
 @Observable
 @MainActor
 final class AppModel {
-    var connections: [ConnectionConfig] = Drivers.sampleConnections()
+    /// Saved connections, in user order. Passwords are not included (they're in `secrets`).
+    var connections: [ConnectionConfig] = []
+    /// Set when the connections file couldn't be read (shown in the sidebar).
+    var storeError: String?
+    /// The open "New / Edit Connection" sheet.
+    var editor: ConnectionEditorRequest?
+    /// Connection waiting for delete confirmation.
+    var pendingDeletion: ConnectionConfig?
+
+    private let store: ConnectionStore?
+    private let secrets: any SecretStore
+
+    init(store: ConnectionStore? = nil, secrets: any SecretStore = KeychainSecretStore()) {
+        self.secrets = secrets
+        do {
+            // DBGUI_CONNECTIONS_FILE points at another file (handy for testing).
+            let override = ProcessInfo.processInfo.environment["DBGUI_CONNECTIONS_FILE"]
+            self.store = try store ?? override.map(ConnectionStore.open(path:)) ?? ConnectionStore.openDefault()
+            connections = self.store?.connections() ?? []
+        } catch {
+            self.store = nil
+            storeError = error.localizedDescription
+        }
+    }
     var selectedConnectionID: ConnectionConfig.ID? {
         // Show a spinner, not the previous connection's tables, until the new ones load.
         didSet { if selectedConnectionID != oldValue { schemas = .loading } }
@@ -168,12 +204,114 @@ final class AppModel {
         schemas.value?.lazy.flatMap(\.tables).first { $0.id == id }
     }
 
+    /// The driver for a connection, created on first use with the latest saved settings
+    /// and the password from the Keychain (read only now, so browsing never prompts).
     private func driver(for config: ConnectionConfig) -> any DatabaseDriver {
         if let d = drivers[config.id] { return d }
-        let d = Drivers.make(for: config)
+        var current = connections.first { $0.id == config.id } ?? config
+        if current.password == nil { current.password = secrets.password(for: config.id) }
+        let d = Drivers.make(for: current)
         drivers[config.id] = d
         return d
     }
+
+    // MARK: Saved connections
+
+    func newConnection() {
+        editor = ConnectionEditorRequest(original: nil)
+    }
+
+    func edit(_ config: ConnectionConfig) {
+        editor = ConnectionEditorRequest(original: config)
+    }
+
+    func hasSavedPassword(_ id: ConnectionConfig.ID) -> Bool {
+        !id.isEmpty && secrets.hasPassword(for: id)
+    }
+
+    func savedPassword(_ id: ConnectionConfig.ID) -> String? {
+        id.isEmpty ? nil : secrets.password(for: id)
+    }
+
+    /// Saves a new or edited connection. `password`: nil keeps the saved one, "" removes it.
+    /// Changing how to connect drops the live connection and closes its tabs.
+    @discardableResult
+    func save(_ config: ConnectionConfig, password: String?) throws -> ConnectionConfig {
+        guard let store else { throw DatabaseError.storage(storeError ?? "no connections file") }
+        let previous = connections.first { $0.id == config.id }
+        let saved = try store.upsert(config).refreshed
+        if let password {
+            if password.isEmpty { secrets.deletePassword(for: saved.id) } else { try secrets.setPassword(password, for: saved.id) }
+        }
+        if let previous, previous.connectsDifferently(than: saved) || password != nil {
+            resetConnection(saved.id)
+        }
+        connections = store.connections()
+        failedConnections.remove(saved.id)
+        return saved
+    }
+
+    /// Saves a copy (with the same password) and selects it.
+    func duplicate(_ config: ConnectionConfig) {
+        let fresh = ConnectionConfig(
+            id: "", name: "\(config.name) copy", group: config.group, kind: config.kind, host: config.host,
+            port: config.port, database: config.database, user: config.user, sslMode: config.sslMode)
+        do {
+            let saved = try save(fresh, password: savedPassword(config.id))
+            selectedConnectionID = saved.id
+        } catch {
+            storeError = error.localizedDescription
+        }
+    }
+
+    func delete(_ config: ConnectionConfig) {
+        guard let store else { return }
+        do {
+            try store.remove(id: config.id)
+        } catch {
+            storeError = error.localizedDescription
+            return
+        }
+        resetConnection(config.id)
+        secrets.deletePassword(for: config.id)
+        connections = store.connections()
+        failedConnections.remove(config.id)
+        if selectedConnectionID == config.id {
+            selectedConnectionID = nil
+            schemas = .idle
+        }
+    }
+
+    /// Tries a config from the editor without saving it. Returns an error message or nil.
+    func test(_ config: ConnectionConfig) async -> String? {
+        let driver = Drivers.make(for: config)
+        defer { Task { await driver.disconnect() } }
+        do {
+            try await driver.connect()
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
+    /// Disconnects and forgets the driver (so the next use picks up new settings) and closes its tabs.
+    private func resetConnection(_ id: ConnectionConfig.ID) {
+        if let driver = drivers.removeValue(forKey: id) {
+            Task { await driver.disconnect() }
+        }
+        openConnections.remove(id)
+        tabs.filter { $0.connection.id == id }.forEach { close($0.id) }
+        if id == selectedConnectionID { schemas = .loading; Task { await loadSchemas() } }
+    }
+
+    #if DEBUG
+    /// Adds the core's sample connections (mock data + the dev database on :54329).
+    func addSampleConnections() {
+        for sample in Drivers.sampleConnections() where !connections.contains(where: { $0.id == sample.id }) {
+            do { try save(sample, password: sample.password) } catch { storeError = error.localizedDescription }
+        }
+    }
+    #endif
 
     // MARK: Connection state
 

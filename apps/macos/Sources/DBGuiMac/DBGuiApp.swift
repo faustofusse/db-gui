@@ -13,7 +13,7 @@ struct DBGuiApp: App {
                 .frame(minWidth: 900, minHeight: 500)
         }
         .defaultSize(width: 1400, height: 880)
-        .commands { TabCommands(model: model) }
+        .commands { AppCommands(model: model) }
     }
 }
 

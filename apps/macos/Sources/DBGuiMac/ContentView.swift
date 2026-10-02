@@ -4,6 +4,7 @@ struct ContentView: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
+        @Bindable var model = model
         NavigationSplitView {
             ConnectionsSidebar()
                 .navigationSplitViewColumnWidth(min: 200, ideal: 240, max: 320)
@@ -15,6 +16,19 @@ struct ContentView: View {
         }
         .separatorColoredSplitDividers()
         .task { await model.monitorConnections() }
+        .sheet(item: $model.editor) { request in
+            ConnectionEditor(original: request.original)
+        }
+        .confirmationDialog(
+            "Delete “\(model.pendingDeletion?.name ?? "")”?",
+            isPresented: Binding(get: { model.pendingDeletion != nil }, set: { if !$0 { model.pendingDeletion = nil } }),
+            presenting: model.pendingDeletion
+        ) { connection in
+            Button("Delete", role: .destructive) { model.delete(connection) }
+            Button("Cancel", role: .cancel) {}
+        } message: { _ in
+            Text("Its saved password is removed from the Keychain and its open tabs are closed.")
+        }
     }
 }
 

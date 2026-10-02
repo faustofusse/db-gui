@@ -4,7 +4,7 @@
 //! stays free of FFI concerns; the GPUI app links `dbcore` directly and never sees this crate.
 //! Keep this surface small: a few objects plus plain records, with rows sent in pages.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 uniffi::setup_scaffolding!();
 
@@ -97,6 +97,10 @@ pub enum DbError {
     Query { message: String },
     #[error("Query cancelled")]
     Cancelled,
+    #[error("{message}")]
+    InvalidConfig { message: String },
+    #[error("Couldn’t save connections: {message}")]
+    Storage { message: String },
     #[error("Internal error: {message}")]
     Internal { message: String },
 }
@@ -150,7 +154,81 @@ impl Connection {
     }
 }
 
-/// Sample connections until real connection storage exists.
+/// Saved connections (JSON file, no passwords). Passwords live in the Keychain, owned by the app.
+#[derive(uniffi::Object)]
+pub struct ConnectionStore {
+    inner: Mutex<dbcore::ConnectionStore>,
+}
+
+#[uniffi::export]
+impl ConnectionStore {
+    /// Opens the store at `path` (a missing file is an empty store).
+    #[uniffi::constructor]
+    pub fn open(path: String) -> Result<Arc<Self>, DbError> {
+        Ok(Arc::new(Self { inner: Mutex::new(dbcore::ConnectionStore::open(path)?) }))
+    }
+
+    /// Opens the store at the platform default location.
+    #[uniffi::constructor]
+    pub fn open_default() -> Result<Arc<Self>, DbError> {
+        let path = dbcore::store::default_path()
+            .ok_or_else(|| DbError::Storage { message: "no home directory".into() })?;
+        Ok(Arc::new(Self { inner: Mutex::new(dbcore::ConnectionStore::open(path)?) }))
+    }
+
+    pub fn path(&self) -> String {
+        self.lock().path().display().to_string()
+    }
+
+    pub fn connections(&self) -> Vec<ConnectionConfig> {
+        self.lock().connections().iter().cloned().map(Into::into).collect()
+    }
+
+    /// Adds or replaces (by id) and saves. An empty id gets a new one. Returns the stored config.
+    pub fn upsert(&self, config: ConnectionConfig) -> Result<ConnectionConfig, DbError> {
+        Ok(self.lock().upsert(config.into())?.into())
+    }
+
+    pub fn remove(&self, id: String) -> Result<bool, DbError> {
+        Ok(self.lock().remove(&id)?)
+    }
+}
+
+impl ConnectionStore {
+    fn lock(&self) -> std::sync::MutexGuard<'_, dbcore::ConnectionStore> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// Blank config for the "Add Connection" form.
+#[uniffi::export]
+pub fn new_connection_config(kind: DatabaseKind) -> ConnectionConfig {
+    dbcore::ConnectionConfig::new_empty(kind.into()).into()
+}
+
+/// First problem with the config, or `None` if it can be saved.
+#[uniffi::export]
+pub fn validate_connection(config: ConnectionConfig) -> Option<String> {
+    dbcore::ConnectionConfig::from(config).validate().err().map(|e| e.to_string())
+}
+
+/// Parses `postgres://user:pass@host:port/db?sslmode=…` (and mysql/sqlite URLs).
+#[uniffi::export]
+pub fn parse_connection_url(url: String) -> Result<ConnectionConfig, DbError> {
+    Ok(dbcore::ConnectionConfig::from_url(&url)?.into())
+}
+
+#[uniffi::export]
+pub fn connection_url(config: ConnectionConfig, include_password: bool) -> String {
+    dbcore::ConnectionConfig::from(config).to_url(include_password)
+}
+
+#[uniffi::export]
+pub fn default_port(kind: DatabaseKind) -> Option<u16> {
+    dbcore::DatabaseKind::from(kind).default_port()
+}
+
+/// Sample connections (mock data + the dev database) for development.
 #[uniffi::export]
 pub fn sample_connections() -> Vec<ConnectionConfig> {
     dbcore::mock::connections().into_iter().map(Into::into).collect()
@@ -320,6 +398,8 @@ impl From<dbcore::Error> for DbError {
             E::Unsupported(message) => Self::Unsupported { message },
             E::Query(message) => Self::Query { message },
             E::Cancelled => Self::Cancelled,
+            E::InvalidConfig(message) => Self::InvalidConfig { message },
+            E::Storage(message) => Self::Storage { message },
             E::Internal(message) => Self::Internal { message },
         }
     }

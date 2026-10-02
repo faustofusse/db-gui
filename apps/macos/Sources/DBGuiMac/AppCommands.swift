@@ -1,8 +1,8 @@
 import AppKit
 import SwiftUI
 
-/// Tab navigation in the Window menu, with Safari's shortcuts.
-struct TabCommands: Commands {
+/// Menu commands: connections (File), Find, and tab navigation with Safari's shortcuts.
+struct AppCommands: Commands {
     let model: AppModel
 
     var body: some Commands {
@@ -19,6 +19,19 @@ struct TabCommands: Commands {
 
             Button("Close Window") { NSApp.keyWindow?.performClose(nil) }
                 .keyboardShortcut("w", modifiers: [.command, .shift])
+        }
+
+        CommandGroup(after: .newItem) {
+            Button("New Connection…") { model.newConnection() }
+                .keyboardShortcut("n", modifiers: [.command, .shift])
+            Button("Edit Connection…") {
+                if let c = model.selectedConnection { model.edit(c) }
+            }
+            .keyboardShortcut("e", modifiers: [.command, .shift])
+            .disabled(model.selectedConnection == nil)
+            #if DEBUG
+            Button("Add Sample Connections") { model.addSampleConnections() }
+            #endif
         }
 
         CommandGroup(after: .textEditing) {

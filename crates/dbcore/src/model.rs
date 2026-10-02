@@ -1,6 +1,9 @@
 //! Plain data types shared by every frontend.
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum DatabaseKind {
     Postgres,
     Mysql,
@@ -15,10 +18,20 @@ impl DatabaseKind {
             Self::Sqlite => "SQLite",
         }
     }
+
+    /// The server's standard port (`None` for file databases).
+    pub fn default_port(self) -> Option<u16> {
+        match self {
+            Self::Postgres => Some(5432),
+            Self::Mysql => Some(3306),
+            Self::Sqlite => None,
+        }
+    }
 }
 
 /// TLS behaviour, named after libpq's `sslmode`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum SslMode {
     /// Plain TCP.
     Disable,

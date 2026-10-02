@@ -57,11 +57,28 @@ nix develop        # Rust toolchain from rust-toolchain.toml (+ rust-analyzer), 
 ./scripts/dev-db.sh up     # postgres://postgres:postgres@localhost:54329/app_dev
 ```
 
-The `app_dev` sample connection points at it. All other sample connections still use the mock
-driver. The seed (`dev/postgres/init.sql`) covers the types and relation kinds the driver has to
+Add it with **File ▸ Add Sample Connections** (debug builds only). This adds the sample
+connections, and `app_dev` among them points at the dev database. All other samples use the mock driver. The seed (`dev/postgres/init.sql`) covers the types and relation kinds the driver has to
 handle: uuid, jsonb, arrays, enums, inet, bytea, intervals, big NUMERICs, views, a materialized
 view, a partitioned table, a table without a primary key and an empty schema.
 `./scripts/dev-db.sh reset` recreates it from scratch.
+
+## Saved connections
+
+- The core (`crates/dbcore/src/store.rs`) keeps connections in a versioned JSON file:
+  `~/Library/Application Support/DBGui/connections.json` on macOS and
+  `$XDG_CONFIG_HOME/dbgui/connections.json` on Linux. Writes are atomic and the file mode is 0600.
+- Passwords never go in that file. The frontend keeps them in the platform keychain (macOS
+  Keychain, service `dev.fausto.dbgui.connection`, account = connection id) and passes them in
+  when it connects. The Keychain is only read when a connection opens or a test runs.
+- URL parsing (`postgres://user:pass@host:port/db?sslmode=…`), validation and "Copy URL" also live
+  in the core, so every frontend's connection form behaves the same.
+- In the app: **File ▸ New Connection… (⇧⌘N)**, **Edit Connection… (⇧⌘E)**, the sidebar context
+  menu (Edit / Duplicate / Copy URL / Delete), and ⌫ to delete the selected connection.
+- Set `DBGUI_CONNECTIONS_FILE=/path/to/file.json` to use a different file, for example
+  `open --env DBGUI_CONNECTIONS_FILE=/tmp/c.json build/DBGui.app`.
+- The app is ad-hoc signed, so after a rebuild macOS may ask once to let DBGui read a saved
+  password. Click "Always Allow".
 
 ## Postgres driver
 

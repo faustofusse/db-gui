@@ -6,6 +6,8 @@ public enum DatabaseError: Error, Sendable, LocalizedError {
     case unsupported(String)
     case query(String)
     case cancelled
+    case invalidConfig(String)
+    case storage(String)
     case `internal`(String)
 
     public var errorDescription: String? {
@@ -15,6 +17,8 @@ public enum DatabaseError: Error, Sendable, LocalizedError {
         case .unsupported(let what): "Unsupported: \(what)"
         case .query(let msg): msg
         case .cancelled: "Query cancelled"
+        case .invalidConfig(let msg): msg
+        case .storage(let msg): "Couldn’t save connections: \(msg)"
         case .internal(let msg): "Internal error: \(msg)"
         }
     }
@@ -40,7 +44,7 @@ public enum Drivers {
         RustDriver(config: config)
     }
 
-    /// Hardcoded connections provided by the core until real connection storage exists.
+    /// Sample connections (mock data + the dev database), for development.
     public static func sampleConnections() -> [ConnectionConfig] {
         RustDriver.sampleConnections()
     }

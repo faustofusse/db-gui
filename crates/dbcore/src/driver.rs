@@ -14,6 +14,10 @@ pub enum Error {
     Query(String),
     #[error("Query cancelled")]
     Cancelled,
+    #[error("{0}")]
+    InvalidConfig(String),
+    #[error("Couldn’t save connections: {0}")]
+    Storage(String),
     #[error("Internal error: {0}")]
     Internal(String),
 }

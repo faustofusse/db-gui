@@ -2,8 +2,7 @@ import DBCoreFFI
 
 /// `DatabaseDriver` backed by the shared Rust core through UniFFI.
 ///
-/// This file is the only place that knows about the generated `DBCoreFFI` types;
-/// everything else in the app uses DBKit's own models.
+/// Only DBKit knows about the generated `DBCoreFFI` types; the app uses DBKit's own models.
 final class RustDriver: DatabaseDriver {
     let config: ConnectionConfig
     private let connection: DBCoreFFI.Connection
@@ -71,6 +70,8 @@ extension DatabaseError {
         case .Unsupported(let message): self = .unsupported(message)
         case .Query(let message): self = .query(message)
         case .Cancelled: self = .cancelled
+        case .InvalidConfig(let message): self = .invalidConfig(message)
+        case .Storage(let message): self = .storage(message)
         case .Internal(let message): self = .internal(message)
         }
     }
