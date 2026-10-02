@@ -18,7 +18,7 @@ In debug builds, **File ▸ Add Sample Connections** adds `app_dev` plus some mo
 ## Layout
 
 ```
-crates/dbcore/      Rust core: models, drivers (Postgres + mock), connection store
+crates/dbcore/      Rust core: models, drivers (Postgres + mock), connection store, SQL highlighting
 crates/dbcore-ffi/  UniFFI bindings for Swift
 apps/macos/         SwiftUI app
 apps/linux/         GPUI app (todo)
@@ -38,5 +38,7 @@ cargo test -p dbcore              # core (Postgres tests skip without a database
 - Connections are saved to `~/Library/Application Support/dbear/connections.json` (or
   `$XDG_CONFIG_HOME/dbear/` on Linux). Override the path with `DBEAR_CONNECTIONS_FILE`.
 - Passwords go in the system keychain, never in that file.
+- SQL highlighting uses tree-sitter with [DerekStride/tree-sitter-sql](https://github.com/DerekStride/tree-sitter-sql)
+  (crate `tree-sitter-sequel`) in `dbcore::highlight`. The core returns spans and each frontend picks the colors.
 - `bundle-mac.sh` signs with your "Apple Development" identity when you have one, so the
   Keychain's "Always Allow" survives rebuilds.

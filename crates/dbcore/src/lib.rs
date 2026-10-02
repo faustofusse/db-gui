@@ -7,6 +7,7 @@
 mod config;
 mod connection;
 pub mod driver;
+pub mod highlight;
 pub mod mock;
 pub mod model;
 pub mod postgres;

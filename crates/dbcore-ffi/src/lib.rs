@@ -245,6 +245,75 @@ pub fn core_version() -> String {
     env!("CARGO_PKG_VERSION").into()
 }
 
+// MARK: Syntax highlighting
+
+#[derive(uniffi::Enum, Clone, Copy)]
+pub enum HighlightKind {
+    Keyword,
+    Type,
+    Object,
+    Function,
+    Field,
+    Variable,
+    Parameter,
+    String,
+    Number,
+    Constant,
+    Comment,
+    Operator,
+    Punctuation,
+}
+
+/// `location`/`length` are UTF-16 code units, ready for `NSRange`.
+#[derive(uniffi::Record)]
+pub struct HighlightSpan {
+    pub location: u32,
+    pub length: u32,
+    pub kind: HighlightKind,
+}
+
+/// Highlight spans for a SQL script, sorted by location (later spans are more specific).
+#[uniffi::export]
+pub fn highlight_sql(text: String) -> Vec<HighlightSpan> {
+    let spans = dbcore::highlight::highlight_sql(&text);
+    if spans.is_empty() {
+        return Vec::new();
+    }
+    // Byte offset -> UTF-16 offset, for every char boundary (plus the end).
+    let mut utf16 = vec![0u32; text.len() + 1];
+    let mut units = 0u32;
+    for (i, c) in text.char_indices() {
+        utf16[i] = units;
+        units += c.len_utf16() as u32;
+    }
+    utf16[text.len()] = units;
+    spans
+        .into_iter()
+        .map(|s| HighlightSpan { location: utf16[s.start], length: utf16[s.end] - utf16[s.start], kind: s.kind.into() })
+        .collect()
+}
+
+impl From<dbcore::highlight::HighlightKind> for HighlightKind {
+    fn from(k: dbcore::highlight::HighlightKind) -> Self {
+        use dbcore::highlight::HighlightKind as K;
+        match k {
+            K::Keyword => Self::Keyword,
+            K::Type => Self::Type,
+            K::Object => Self::Object,
+            K::Function => Self::Function,
+            K::Field => Self::Field,
+            K::Variable => Self::Variable,
+            K::Parameter => Self::Parameter,
+            K::String => Self::String,
+            K::Number => Self::Number,
+            K::Constant => Self::Constant,
+            K::Comment => Self::Comment,
+            K::Operator => Self::Operator,
+            K::Punctuation => Self::Punctuation,
+        }
+    }
+}
+
 // MARK: Conversions
 
 impl From<DatabaseKind> for dbcore::DatabaseKind {

@@ -20,6 +20,8 @@ serde_json.workspace = true
 uuid.workspace = true
 url.workspace = true
 percent-encoding.workspace = true
+tree-sitter.workspace = true
+tree-sitter-sequel.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
