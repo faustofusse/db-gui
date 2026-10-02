@@ -128,6 +128,10 @@ impl Driver for SqliteDriver {
         self.run(&self.browse, list_schemas).await
     }
 
+    async fn list_columns(&self) -> Result<Vec<TableColumns>> {
+        self.run(&self.browse, list_columns).await
+    }
+
     async fn fetch_rows(&self, table: &TableInfo, limit: u32, offset: u64) -> Result<QueryResult> {
         let table = table.clone();
         self.run(&self.browse, move |conn| fetch_rows(conn, &table, limit, offset)).await
@@ -203,6 +207,44 @@ fn list_schemas(conn: &rusqlite::Connection) -> Result<Vec<Schema>> {
         schemas.push(Schema { name: database, tables });
     }
     Ok(schemas)
+}
+
+fn list_columns(conn: &rusqlite::Connection) -> Result<Vec<TableColumns>> {
+    let databases: Vec<String> = conn
+        .prepare("select name from pragma_database_list order by seq")
+        .and_then(|mut s| s.query_map([], |r| r.get(0))?.collect())
+        .map_err(|e| query_error(e, None))?;
+
+    let mut tables: Vec<TableColumns> = Vec::new();
+    for database in databases {
+        let schema_ident = SQLITE.quote_ident(&database);
+        let sql = format!(
+            "select m.name, ti.name, ti.type, ti.\"notnull\", ti.pk
+             from {schema_ident}.sqlite_master m, pragma_table_info(m.name, '{database}') ti
+             where m.type in ('table', 'view') and m.name not like 'sqlite\\_%' escape '\\'
+             order by m.name, ti.cid"
+        );
+        let rows: Vec<(String, String, String, bool, i64)> = match conn.prepare(&sql) {
+            Ok(mut stmt) => stmt
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
+                .and_then(|rows| rows.collect())
+                .map_err(|e| query_error(e, None))?,
+            // `temp` may have nothing attached yet; a missing schema also lands here.
+            Err(_) => continue,
+        };
+        for (table, column, type_name, not_null, pk) in rows {
+            if tables.last().is_none_or(|t| t.schema != database || t.table != table) {
+                tables.push(TableColumns { schema: database.clone(), table, columns: Vec::new() });
+            }
+            tables.last_mut().unwrap().columns.push(ColumnInfo {
+                name: column,
+                type_name: type_name.to_lowercase(),
+                is_primary_key: pk > 0,
+                is_nullable: !not_null && pk == 0,
+            });
+        }
+    }
+    Ok(tables)
 }
 
 fn file_size(conn: &rusqlite::Connection) -> Option<i64> {

@@ -190,6 +190,47 @@ impl Driver for PostgresDriver {
         Ok(schemas)
     }
 
+    async fn list_columns(&self) -> Result<Vec<TableColumns>> {
+        let client = self.browse_client().await?;
+        let rows = client
+            .query(
+                r"
+                select n.nspname, c.relname, a.attname,
+                       format_type(a.atttypid, a.atttypmod), a.attnotnull,
+                       coalesce(a.attnum = any(i.indkey), false)
+                from pg_namespace n
+                join pg_class c
+                  on c.relnamespace = n.oid
+                 and c.relkind in ('r', 'p', 'v', 'm', 'f')
+                 and not c.relispartition
+                join pg_attribute a on a.attrelid = c.oid and a.attnum > 0 and not a.attisdropped
+                left join pg_index i on i.indrelid = c.oid and i.indisprimary
+                where n.nspname not in ('information_schema')
+                  and n.nspname not like 'pg\_%'
+                order by n.nspname, c.relname, a.attnum
+                ",
+                &[],
+            )
+            .await
+            .map_err(|e| query_error(&e, None))?;
+
+        let mut tables: Vec<TableColumns> = Vec::new();
+        for row in rows {
+            let schema: String = row.get(0);
+            let table: String = row.get(1);
+            if tables.last().is_none_or(|t| t.schema != schema || t.table != table) {
+                tables.push(TableColumns { schema, table, columns: Vec::new() });
+            }
+            tables.last_mut().unwrap().columns.push(ColumnInfo {
+                name: row.get(2),
+                type_name: row.get(3),
+                is_nullable: !row.get::<_, bool>(4),
+                is_primary_key: row.get(5),
+            });
+        }
+        Ok(tables)
+    }
+
     async fn fetch_rows(&self, table: &TableInfo, limit: u32, offset: u64) -> Result<QueryResult> {
         let client = self.browse_client().await?;
         let relation = quote_relation(&table.schema, &table.name);

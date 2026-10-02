@@ -6,6 +6,7 @@
 
 mod config;
 mod connection;
+pub mod complete;
 pub mod dialect;
 pub mod driver;
 pub mod highlight;

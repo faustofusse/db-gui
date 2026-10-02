@@ -110,6 +110,19 @@ public struct ColumnInfo: Identifiable, Hashable, Sendable {
     }
 }
 
+/// Columns of one table or view, for SQL completion (`DatabaseDriver.listColumns`).
+public struct TableColumns: Sendable {
+    public var schema: String
+    public var table: String
+    public var columns: [ColumnInfo]
+
+    public init(schema: String, table: String, columns: [ColumnInfo]) {
+        self.schema = schema
+        self.table = table
+        self.columns = columns
+    }
+}
+
 public enum DBValue: Hashable, Sendable {
     case null
     case bool(Bool)

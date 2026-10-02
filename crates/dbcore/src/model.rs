@@ -169,6 +169,14 @@ pub struct ColumnInfo {
     pub is_nullable: bool,
 }
 
+/// Columns of one table or view, for SQL completion (`Driver::list_columns`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TableColumns {
+    pub schema: String,
+    pub table: String,
+    pub columns: Vec<ColumnInfo>,
+}
+
 /// A single cell. Drivers decode wire types into one of these.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {

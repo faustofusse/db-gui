@@ -32,6 +32,19 @@ fn column<'a>(result: &'a dbcore::QueryResult, name: &str) -> Vec<&'a Value> {
 }
 
 #[test]
+fn lists_columns_of_every_table() {
+    if !enabled() {
+        return;
+    }
+    let tables = block_on(dev().list_columns()).unwrap();
+    let users = tables.iter().find(|t| t.schema == "public" && t.table == "users").expect("users");
+    let names: Vec<_> = users.columns.iter().map(|c| c.name.as_str()).collect();
+    assert!(names.contains(&"id") && names.contains(&"email") && names.contains(&"name"), "{names:?}");
+    let id = users.columns.iter().find(|c| c.name == "id").unwrap();
+    assert!(id.is_primary_key && !id.is_nullable);
+}
+
+#[test]
 fn lists_databases_and_browses_another_one() {
     if !enabled() {
         return;

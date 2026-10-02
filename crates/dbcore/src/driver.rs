@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use crate::model::{ConnectionConfig, QueryResult, Schema, TableInfo};
+use crate::model::{ConnectionConfig, QueryResult, Schema, TableColumns, TableInfo};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Error {
@@ -42,6 +42,9 @@ pub trait Driver: Send + Sync + 'static {
         Ok(vec![self.config().database.clone()])
     }
     async fn list_schemas(&self) -> Result<Vec<Schema>>;
+    /// Columns of every table and view this connection can see, for SQL completion.
+    /// Grouped by table, never one column at a time.
+    async fn list_columns(&self) -> Result<Vec<TableColumns>>;
     /// One page of a table in a stable order. `total_count` is only computed for the first
     /// page (`offset == 0`), so loading further pages stays cheap.
     async fn fetch_rows(&self, table: &TableInfo, limit: u32, offset: u64) -> Result<QueryResult>;

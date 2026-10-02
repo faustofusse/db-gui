@@ -35,6 +35,8 @@ public protocol DatabaseDriver: Sendable {
     /// Databases on the same server this login can open (just the configured one for SQLite).
     func listDatabases() async throws -> [String]
     func listSchemas() async throws -> [Schema]
+    /// Columns of every table and view this connection can see, for SQL completion.
+    func listColumns() async throws -> [TableColumns]
     /// One page of a table. `totalCount` is only set for the first page (`offset == 0`).
     func fetchRows(of table: TableInfo, limit: Int, offset: Int) async throws -> QueryResult
     /// Runs a script keeping at most `maxRows` rows (nil = all); see `QueryResult.truncated`.

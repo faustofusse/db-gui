@@ -216,6 +216,39 @@ impl Driver for MysqlDriver {
         Ok(schemas)
     }
 
+    async fn list_columns(&self) -> Result<Vec<TableColumns>> {
+        let filter = match self.only_database() {
+            Some(db) => format!("table_schema = {}", MYSQL.quote_literal(db)),
+            None => format!(
+                "table_schema not in ({})",
+                SYSTEM_SCHEMAS.iter().map(|s| MYSQL.quote_literal(s)).collect::<Vec<_>>().join(", ")
+            ),
+        };
+        let sql = format!(
+            "select table_schema, table_name, column_name, column_type, is_nullable, column_key
+             from information_schema.columns
+             where {filter}
+             order by table_schema, table_name, ordinal_position"
+        );
+        let mut lease = self.browse.lease(&self.config).await?;
+        let result = lease.conn().query::<(String, String, String, String, String, String), _>(sql).await;
+        let rows = lease.check(result).map_err(|e| query_error(&e))?;
+
+        let mut tables: Vec<TableColumns> = Vec::new();
+        for (schema, table, column, type_name, nullable, key) in rows {
+            if tables.last().is_none_or(|t| t.schema != schema || t.table != table) {
+                tables.push(TableColumns { schema, table, columns: Vec::new() });
+            }
+            tables.last_mut().unwrap().columns.push(ColumnInfo {
+                name: column,
+                type_name,
+                is_primary_key: key == "PRI",
+                is_nullable: nullable == "YES",
+            });
+        }
+        Ok(tables)
+    }
+
     async fn fetch_rows(&self, table: &TableInfo, limit: u32, offset: u64) -> Result<QueryResult> {
         let mut lease = self.browse.lease(&self.config).await?;
         let meta = TableMeta::load(&mut lease, table).await?;

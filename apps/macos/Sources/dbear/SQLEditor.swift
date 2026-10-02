@@ -14,6 +14,9 @@ struct SQLEditor: NSViewRepresentable {
     var initialSelection: [NSRange] = []
     /// Selected UTF-16 ranges whenever the selection or caret moves.
     var onSelectionChange: ([NSRange]) -> Void = { _ in }
+    /// Schema catalog for completion; `nil` while it's loading (⌃Space and autocomplete do nothing).
+    var completionCatalog: CompletionCatalog?
+    var databaseKind: DatabaseKind = .postgres
 
     func makeCoordinator() -> Coordinator {
         Coordinator(text: $text, theme: SQLTheme(fontSize: fontSize), onSelectionChange: onSelectionChange)
@@ -26,6 +29,7 @@ struct SQLEditor: NSViewRepresentable {
 
         let textView = scrollView.documentView as! SQLTextView
         textView.onZoomIn = onZoomIn
+        textView.completionHandler = context.coordinator
         textView.delegate = context.coordinator
         textView.drawsBackground = false
         textView.isRichText = false
@@ -51,6 +55,8 @@ struct SQLEditor: NSViewRepresentable {
 
         textView.string = text
         context.coordinator.textView = textView
+        context.coordinator.catalog = completionCatalog
+        context.coordinator.databaseKind = databaseKind
         context.coordinator.highlight()
         let length = (text as NSString).length
         let restored = initialSelection.filter { NSMaxRange($0) <= length }
@@ -73,6 +79,8 @@ struct SQLEditor: NSViewRepresentable {
         let coordinator = context.coordinator
         coordinator.text = $text
         coordinator.onSelectionChange = onSelectionChange
+        coordinator.catalog = completionCatalog
+        coordinator.databaseKind = databaseKind
         guard let textView = coordinator.textView as? SQLTextView else { return }
         textView.onZoomIn = onZoomIn
         if coordinator.theme.fontSize != fontSize {
@@ -97,21 +105,54 @@ struct SQLEditor: NSViewRepresentable {
         weak var textView: NSTextView?
         private var generation = 0
 
+        // MARK: Completion
+        var catalog: CompletionCatalog?
+        var databaseKind: DatabaseKind = .postgres
+        let popup = CompletionPopup()
+        /// Range in the text the accepted item replaces; set right before the popup is shown.
+        private var replaceRange: NSRange?
+        /// Text just inserted (or `nil`/empty for a deletion), captured before the change lands.
+        private var lastInsertedText: String?
+        private var pendingCompletion: DispatchWorkItem?
+        /// Set in `textDidChange`, consumed by the `textViewDidChangeSelection` it triggers:
+        /// that selection change is a side effect of typing, not the caret moving on its own,
+        /// so it shouldn't hide the popup while `performCompletion` is still debounced.
+        private var selectionChangedByTyping = false
+        /// Set while `accept(_:)` is inserting the chosen item's text, so the resulting
+        /// `textDidChange` doesn't immediately reopen the popup it just closed.
+        private var isAccepting = false
+
         init(text: Binding<String>, theme: SQLTheme, onSelectionChange: @escaping ([NSRange]) -> Void) {
             self.text = text
             self.theme = theme
             self.onSelectionChange = onSelectionChange
+            super.init()
+            popup.onAccept = { [weak self] item in self?.accept(item) }
         }
 
         func textViewDidChangeSelection(_ notification: Notification) {
             guard let textView else { return }
             onSelectionChange(textView.selectedRanges.map(\.rangeValue))
+            defer { selectionChangedByTyping = false }
+            guard !selectionChangedByTyping else { return }
+            // Caret moved on its own (click, arrow keys, running the script\u2026): stop completing.
+            if popup.isVisible, let range = replaceRange, textView.selectedRange() != NSRange(location: NSMaxRange(range), length: 0) {
+                popup.hide()
+            }
+        }
+
+        func textView(_ textView: NSTextView, shouldChangeTextIn affectedCharRange: NSRange, replacementString: String?) -> Bool {
+            lastInsertedText = replacementString
+            return true
         }
 
         func textDidChange(_ notification: Notification) {
             guard let textView else { return }
             text.wrappedValue = textView.string
             highlight()
+            selectionChangedByTyping = true
+            guard !isAccepting else { return }
+            handleCompletionTrigger(lastInsertedText)
         }
 
         /// Small scripts are highlighted synchronously (no flash of unstyled text);
@@ -144,11 +185,112 @@ struct SQLEditor: NSViewRepresentable {
             }
             storage.endEditing()
         }
+
+        // MARK: Completion
+
+        private static let identifierChars = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_"))
+
+        /// Decides whether to trigger completion after a text change: immediately after `.`,
+        /// debounced while typing an identifier word, refiltered right away on deletion
+        /// (while the popup is open), and dismissed after anything else (space, `;`, `(`\u2026).
+        private func handleCompletionTrigger(_ inserted: String?) {
+            guard let inserted, let last = inserted.last else {
+                pendingCompletion?.cancel()
+                if popup.isVisible { performCompletion() }
+                return
+            }
+            if last == "." {
+                requestCompletion(immediate: true)
+            } else if String(last).rangeOfCharacter(from: Self.identifierChars) != nil {
+                requestCompletion(immediate: false)
+            } else {
+                pendingCompletion?.cancel()
+                popup.hide()
+            }
+        }
+
+        func requestCompletion(immediate: Bool) {
+            pendingCompletion?.cancel()
+            guard immediate else {
+                let work = DispatchWorkItem { [weak self] in self?.performCompletion() }
+                pendingCompletion = work
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: work)
+                return
+            }
+            performCompletion()
+        }
+
+        /// \u2303Space: always shows the list, even if the word is already complete.
+        func requestManualCompletion() {
+            pendingCompletion?.cancel()
+            performCompletion(manual: true)
+        }
+
+        /// Large scripts (already off the main thread for highlighting) skip automatic
+        /// completion; it's cheap, but there's no reason to run it on every keystroke there.
+        private func performCompletion(manual: Bool = false) {
+            guard !isAccepting, let textView, let catalog, let window = textView.window else {
+                popup.hide()
+                return
+            }
+            let source = textView.string
+            guard source.utf16.count < 200_000 else { return }
+            let location = textView.selectedRange().location
+            let result = catalog.complete(text: source, location: location, kind: databaseKind)
+            guard textView.selectedRange().location == location else { return } // caret moved meanwhile
+            // Nothing left to complete: the word typed already is the only suggestion.
+            let typed = (source as NSString).substring(with: result.range)
+            let onlyExactMatches = result.items.allSatisfy { $0.label.caseInsensitiveCompare(typed) == .orderedSame }
+            guard !result.items.isEmpty, manual || !onlyExactMatches else {
+                popup.hide()
+                return
+            }
+            replaceRange = result.range
+            var actual = NSRange()
+            let screenRect = textView.firstRect(forCharacterRange: result.range, actualRange: &actual)
+            popup.show(items: result.items, below: screenRect, in: window)
+        }
+
+        private func accept(_ item: CompletionItem) {
+            popup.hide()
+            guard let textView, let range = replaceRange, NSMaxRange(range) <= (textView.string as NSString).length else { return }
+            pendingCompletion?.cancel()
+            isAccepting = true
+            textView.insertText(item.insertText, replacementRange: range)
+            // The change notification isn't guaranteed to arrive inside `insertText`; keep
+            // suppressing auto-completion until this run loop turn is over.
+            DispatchQueue.main.async { [weak self] in
+                self?.pendingCompletion?.cancel()
+                self?.isAccepting = false
+            }
+        }
     }
+}
+
+extension SQLEditor.Coordinator: CompletionKeyHandling {
+    var isCompletionVisible: Bool { popup.isVisible }
+    func moveCompletionSelection(by delta: Int) { popup.moveSelection(by: delta) }
+    func dismissCompletion() { popup.hide() }
+
+    func acceptCompletion() {
+        if let item = popup.selectedItem { accept(item) } else { popup.hide() }
+    }
+}
+
+/// Lets `SQLTextView` forward keys to the completion popup without depending on `SQLEditor` itself.
+@MainActor
+protocol CompletionKeyHandling: AnyObject {
+    var isCompletionVisible: Bool { get }
+    func moveCompletionSelection(by delta: Int)
+    func acceptCompletion()
+    func dismissCompletion()
+    /// \u2303Space: complete now, even if the word is already complete.
+    func requestManualCompletion()
 }
 
 final class SQLTextView: NSTextView {
     var onZoomIn: () -> Void = {}
+    weak var completionHandler: CompletionKeyHandling?
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
@@ -157,6 +299,24 @@ final class SQLTextView: NSTextView {
             return true
         }
         return super.performKeyEquivalent(with: event)
+    }
+
+    override func keyDown(with event: NSEvent) {
+        if let handler = completionHandler, handler.isCompletionVisible {
+            switch event.keyCode {
+            case 125: handler.moveCompletionSelection(by: 1); return // Down arrow
+            case 126: handler.moveCompletionSelection(by: -1); return // Up arrow
+            case 36, 76, 48: handler.acceptCompletion(); return // Return, Enter, Tab
+            case 53: handler.dismissCompletion(); return // Escape
+            default: break
+            }
+        }
+        // \u2303Space: works whether or not the popup is already open.
+        if event.keyCode == 49, event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .control {
+            completionHandler?.requestManualCompletion()
+            return
+        }
+        super.keyDown(with: event)
     }
 }
 

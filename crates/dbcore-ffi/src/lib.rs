@@ -62,12 +62,19 @@ pub struct Schema {
     pub tables: Vec<TableInfo>,
 }
 
-#[derive(uniffi::Record)]
+#[derive(uniffi::Record, Clone)]
 pub struct ColumnInfo {
     pub name: String,
     pub type_name: String,
     pub is_primary_key: bool,
     pub is_nullable: bool,
+}
+
+#[derive(uniffi::Record, Clone)]
+pub struct TableColumns {
+    pub schema: String,
+    pub table: String,
+    pub columns: Vec<ColumnInfo>,
 }
 
 #[derive(uniffi::Enum)]
@@ -145,6 +152,11 @@ impl Connection {
 
     pub async fn list_schemas(&self) -> Result<Vec<Schema>, DbError> {
         Ok(self.inner.list_schemas().await?.into_iter().map(Into::into).collect())
+    }
+
+    /// Columns of every table and view, for SQL completion (see `CompletionCatalog`).
+    pub async fn list_columns(&self) -> Result<Vec<TableColumns>, DbError> {
+        Ok(self.inner.list_columns().await?.into_iter().map(Into::into).collect())
     }
 
     pub async fn fetch_rows(&self, table: TableInfo, limit: u32, offset: u64) -> Result<QueryResult, DbError> {
@@ -333,6 +345,104 @@ impl From<dbcore::highlight::HighlightKind> for HighlightKind {
     }
 }
 
+// MARK: SQL completion
+
+/// Schemas, tables/views and columns a connection can see, built once per database and reused
+/// on every keystroke (`list_schemas` + `list_columns`).
+#[derive(uniffi::Object)]
+pub struct CompletionCatalog {
+    inner: dbcore::complete::Catalog,
+}
+
+#[uniffi::export]
+impl CompletionCatalog {
+    #[uniffi::constructor]
+    pub fn new(schemas: Vec<Schema>, columns: Vec<TableColumns>) -> Arc<Self> {
+        let schemas = schemas.into_iter().map(Into::into).collect();
+        let columns = columns.into_iter().map(Into::into).collect();
+        Arc::new(Self { inner: dbcore::complete::Catalog::new(schemas, columns) })
+    }
+
+    /// Completions for `text` with the caret at `location` (UTF-16 code units, like `NSRange`).
+    pub fn complete(&self, text: String, location: u32, kind: DatabaseKind) -> Completions {
+        let offset = byte_offset_for_utf16(&text, location);
+        let dialect = dbcore::dialect::Dialect(kind.into());
+        let result = dbcore::complete::complete(&text, offset, &self.inner, dialect);
+        let start = utf16_offset_for_byte(&text, result.replace_start);
+        let end = utf16_offset_for_byte(&text, result.replace_end);
+        Completions { location: start, length: end - start, items: result.items.into_iter().map(Into::into).collect() }
+    }
+}
+
+#[derive(uniffi::Enum, Clone, Copy)]
+pub enum CompletionKind {
+    Keyword,
+    Schema,
+    Table,
+    View,
+    Column,
+    Function,
+}
+
+#[derive(uniffi::Record)]
+pub struct CompletionItem {
+    pub label: String,
+    pub insert_text: String,
+    pub kind: CompletionKind,
+    pub detail: Option<String>,
+}
+
+/// `location`/`length` are UTF-16 code units (like `HighlightSpan`): the range of `text` to
+/// replace with an item's `insert_text`.
+#[derive(uniffi::Record)]
+pub struct Completions {
+    pub location: u32,
+    pub length: u32,
+    pub items: Vec<CompletionItem>,
+}
+
+fn byte_offset_for_utf16(text: &str, utf16_offset: u32) -> usize {
+    let mut units = 0u32;
+    for (byte_idx, c) in text.char_indices() {
+        if units >= utf16_offset {
+            return byte_idx;
+        }
+        units += c.len_utf16() as u32;
+    }
+    text.len()
+}
+
+fn utf16_offset_for_byte(text: &str, byte_offset: usize) -> u32 {
+    let mut units = 0u32;
+    for (byte_idx, c) in text.char_indices() {
+        if byte_idx >= byte_offset {
+            return units;
+        }
+        units += c.len_utf16() as u32;
+    }
+    units
+}
+
+impl From<dbcore::complete::CompletionKind> for CompletionKind {
+    fn from(k: dbcore::complete::CompletionKind) -> Self {
+        use dbcore::complete::CompletionKind as K;
+        match k {
+            K::Keyword => Self::Keyword,
+            K::Schema => Self::Schema,
+            K::Table => Self::Table,
+            K::View => Self::View,
+            K::Column => Self::Column,
+            K::Function => Self::Function,
+        }
+    }
+}
+
+impl From<dbcore::complete::CompletionItem> for CompletionItem {
+    fn from(i: dbcore::complete::CompletionItem) -> Self {
+        Self { label: i.label, insert_text: i.insert_text, kind: i.kind.into(), detail: i.detail }
+    }
+}
+
 // MARK: Conversions
 
 impl From<DatabaseKind> for dbcore::DatabaseKind {
@@ -452,6 +562,30 @@ impl From<dbcore::Schema> for Schema {
 impl From<dbcore::ColumnInfo> for ColumnInfo {
     fn from(c: dbcore::ColumnInfo) -> Self {
         Self { name: c.name, type_name: c.type_name, is_primary_key: c.is_primary_key, is_nullable: c.is_nullable }
+    }
+}
+
+impl From<ColumnInfo> for dbcore::ColumnInfo {
+    fn from(c: ColumnInfo) -> Self {
+        Self { name: c.name, type_name: c.type_name, is_primary_key: c.is_primary_key, is_nullable: c.is_nullable }
+    }
+}
+
+impl From<dbcore::TableColumns> for TableColumns {
+    fn from(t: dbcore::TableColumns) -> Self {
+        Self { schema: t.schema, table: t.table, columns: t.columns.into_iter().map(Into::into).collect() }
+    }
+}
+
+impl From<TableColumns> for dbcore::TableColumns {
+    fn from(t: TableColumns) -> Self {
+        Self { schema: t.schema, table: t.table, columns: t.columns.into_iter().map(Into::into).collect() }
+    }
+}
+
+impl From<Schema> for dbcore::Schema {
+    fn from(s: Schema) -> Self {
+        Self { name: s.name, tables: s.tables.into_iter().map(Into::into).collect() }
     }
 }
 

@@ -17,12 +17,15 @@ struct ScriptTabView: View {
                     fontSize: model.editorFontSize,
                     onZoomIn: { model.zoomEditor(by: 1) },
                     initialSelection: tab.selectedRanges,
-                    onSelectionChange: { [tab] in tab.updateSelection($0) }
+                    onSelectionChange: { [tab] in tab.updateSelection($0) },
+                    completionCatalog: model.completionCatalog(for: tab.connection),
+                    databaseKind: tab.connection.kind
                 )
             }
         } bottom: {
             results
         }
+        .onAppear { model.loadCompletionCatalogIfNeeded(for: tab.connection) }
     }
 
     /// New scripts start focused with the caret at the end (only read when the editor is created).

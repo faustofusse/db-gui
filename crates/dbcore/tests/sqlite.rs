@@ -34,6 +34,19 @@ fn column<'a>(result: &'a dbcore::QueryResult, name: &str) -> Vec<&'a Value> {
 }
 
 #[test]
+fn lists_columns_of_every_table() {
+    let db = seeded();
+    let tables = block_on(open(&db).list_columns()).unwrap();
+    let notes = tables.iter().find(|t| t.schema == "main" && t.table == "notes").expect("notes");
+    let names: Vec<_> = notes.columns.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, ["id", "title", "body", "pinned", "word_count", "score", "price", "attachment", "created_at"], "{names:?}");
+    let id = notes.columns.iter().find(|c| c.name == "id").unwrap();
+    assert!(id.is_primary_key);
+    let body = notes.columns.iter().find(|c| c.name == "body").unwrap();
+    assert!(body.is_nullable);
+}
+
+#[test]
 fn lists_tables_and_views_with_counts() {
     let db = seeded();
     let schemas = block_on(open(&db).list_schemas()).unwrap();

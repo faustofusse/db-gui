@@ -7,7 +7,7 @@ use tokio::runtime::Runtime;
 use tokio::task::JoinHandle;
 
 use crate::driver::{Driver, Error, Result};
-use crate::model::{ConnectionConfig, QueryResult, Schema, TableInfo};
+use crate::model::{ConnectionConfig, QueryResult, Schema, TableColumns, TableInfo};
 use crate::mock::{self, MockDriver};
 use crate::model::DatabaseKind;
 use crate::mysql::MysqlDriver;
@@ -107,6 +107,11 @@ impl Connection {
     pub async fn list_schemas(&self) -> Result<Vec<Schema>> {
         let d = self.driver.clone();
         on_runtime(async move { d.list_schemas().await }).await
+    }
+
+    pub async fn list_columns(&self) -> Result<Vec<TableColumns>> {
+        let d = self.driver.clone();
+        on_runtime(async move { d.list_columns().await }).await
     }
 
     pub async fn fetch_rows(&self, table: TableInfo, limit: u32, offset: u64) -> Result<QueryResult> {

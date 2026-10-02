@@ -312,6 +312,20 @@ impl Driver for MockDriver {
             .collect())
     }
 
+    async fn list_columns(&self) -> Result<Vec<TableColumns>> {
+        self.connect().await?;
+        Ok(specs(self.config.kind)
+            .iter()
+            .flat_map(|(schema, tables)| {
+                tables.iter().map(move |t| TableColumns {
+                    schema: (*schema).into(),
+                    table: t.name.into(),
+                    columns: t.columns.clone(),
+                })
+            })
+            .collect())
+    }
+
     async fn fetch_rows(&self, table: &TableInfo, limit: u32, offset: u64) -> Result<QueryResult> {
         self.connect().await?;
         let (_, spec) = self

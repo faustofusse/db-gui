@@ -1,4 +1,5 @@
 import DBCoreFFI
+import Foundation
 
 /// `DatabaseDriver` backed by the shared Rust core through UniFFI.
 ///
@@ -36,6 +37,10 @@ final class RustDriver: DatabaseDriver {
 
     func listSchemas() async throws -> [Schema] {
         try await bridged { try await connection.listSchemas() }.map(Schema.init)
+    }
+
+    func listColumns() async throws -> [TableColumns] {
+        try await bridged { try await connection.listColumns() }.map(TableColumns.init)
     }
 
     func fetchRows(of table: TableInfo, limit: Int, offset: Int) async throws -> QueryResult {
@@ -174,8 +179,32 @@ extension Schema {
     }
 }
 
+extension DBCoreFFI.Schema {
+    init(_ s: Schema) {
+        self.init(name: s.name, tables: s.tables.map(DBCoreFFI.TableInfo.init))
+    }
+}
+
+extension TableColumns {
+    init(_ t: DBCoreFFI.TableColumns) {
+        self.init(schema: t.schema, table: t.table, columns: t.columns.map(ColumnInfo.init))
+    }
+}
+
+extension DBCoreFFI.TableColumns {
+    init(_ t: TableColumns) {
+        self.init(schema: t.schema, table: t.table, columns: t.columns.map(DBCoreFFI.ColumnInfo.init))
+    }
+}
+
 extension ColumnInfo {
     init(_ c: DBCoreFFI.ColumnInfo) {
+        self.init(name: c.name, typeName: c.typeName, isPrimaryKey: c.isPrimaryKey, isNullable: c.isNullable)
+    }
+}
+
+extension DBCoreFFI.ColumnInfo {
+    init(_ c: ColumnInfo) {
         self.init(name: c.name, typeName: c.typeName, isPrimaryKey: c.isPrimaryKey, isNullable: c.isNullable)
     }
 }
@@ -190,6 +219,47 @@ extension DBValue {
         case .decimal(let s): self = .decimal(s)
         case .text(let s): self = .text(s)
         }
+    }
+}
+
+// MARK: - Completion
+
+/// Schemas, tables/views and columns for one connection, built once and reused on every
+/// keystroke. The only other place besides `RustDriver` that touches `DBCoreFFI` directly
+/// (see `AGENTS.md`): the wrapped type stays private to this file.
+public final class CompletionCatalog: @unchecked Sendable {
+    private let inner: DBCoreFFI.CompletionCatalog
+
+    public init(schemas: [Schema], columns: [TableColumns]) {
+        inner = DBCoreFFI.CompletionCatalog(schemas: schemas.map(DBCoreFFI.Schema.init), columns: columns.map(DBCoreFFI.TableColumns.init))
+    }
+
+    /// Completions for `text` with the caret at UTF-16 offset `location`.
+    public func complete(text: String, location: Int, kind: DatabaseKind) -> Completions {
+        let result = inner.complete(text: text, location: UInt32(clamping: max(0, location)), kind: DBCoreFFI.DatabaseKind(kind))
+        return Completions(
+            range: NSRange(location: Int(result.location), length: Int(result.length)),
+            items: result.items.map(CompletionItem.init)
+        )
+    }
+}
+
+extension CompletionKind {
+    init(_ kind: DBCoreFFI.CompletionKind) {
+        switch kind {
+        case .keyword: self = .keyword
+        case .schema: self = .schema
+        case .table: self = .table
+        case .view: self = .view
+        case .column: self = .column
+        case .function: self = .function
+        }
+    }
+}
+
+extension CompletionItem {
+    init(_ i: DBCoreFFI.CompletionItem) {
+        self.init(label: i.label, insertText: i.insertText, kind: CompletionKind(i.kind), detail: i.detail)
     }
 }
 

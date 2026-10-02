@@ -231,6 +231,11 @@ final class AppModel {
     private var drivers: [DriverKey: any DatabaseDriver] = [:]
     private var scriptCounter = 0
 
+    /// Built once per database and reused on every keystroke for SQL completion.
+    /// `nil` while loading or if it failed (completion is then just unavailable, nothing fatal).
+    private var completionCatalogs: [DriverKey: CompletionCatalog] = [:]
+    private var completionCatalogTasks: [DriverKey: Task<Void, Never>] = [:]
+
     private static let editorFontSizeKey = "editorFontSize"
     private static var storedEditorFontSize: CGFloat {
         let stored = UserDefaults.standard.double(forKey: editorFontSizeKey)
@@ -445,6 +450,7 @@ final class AppModel {
         }
         databaseLists[id] = nil
         openConnections.remove(id)
+        invalidateCompletionCatalogs(of: id)
         tabs.filter { $0.connection.id == id }.forEach { close($0.id) }
         if id == selectedConnectionID { schemas = .loading; Task { await loadSchemas() } }
     }
@@ -481,6 +487,7 @@ final class AppModel {
         tabs.filter { $0.connection.id == config.id }.forEach { close($0.id) }
         databaseLists[config.id] = nil
         expandedConnections.remove(config.id)
+        invalidateCompletionCatalogs(of: config.id)
         if config.id == selectedConnectionID {
             select(nil)
             schemas = .idle
@@ -510,6 +517,7 @@ final class AppModel {
     func loadSchemas() async {
         guard let connection = selectedConnection, let target = selectedTarget else { schemas = .idle; return }
         schemas = .loading
+        invalidateCompletionCatalog(for: target)
         if databaseLists[connection.id] == nil {
             Task { await loadDatabases(connection) }
         }
@@ -540,6 +548,48 @@ final class AppModel {
         } catch {
             // Not fatal: the connection still works with its own database.
         }
+    }
+
+    // MARK: SQL completion
+
+    /// The completion catalog for `connection`, if it's already loaded (`nil` while loading,
+    /// if it failed, or if nothing requested it yet — see `loadCompletionCatalogIfNeeded`).
+    func completionCatalog(for connection: ConnectionConfig) -> CompletionCatalog? {
+        completionCatalogs[connection.driverKey]
+    }
+
+    /// Starts loading the catalog in the background if it isn't cached yet. Cheap to call
+    /// repeatedly (e.g. from a view's `onAppear`): a load already in flight isn't duplicated.
+    func loadCompletionCatalogIfNeeded(for connection: ConnectionConfig) {
+        let key = connection.driverKey
+        guard completionCatalogs[key] == nil, completionCatalogTasks[key] == nil else { return }
+        let driver = driver(for: connection)
+        completionCatalogTasks[key] = Task { [weak self] in
+            guard let self else { return }
+            do {
+                async let schemasResult = driver.listSchemas()
+                async let columnsResult = driver.listColumns()
+                let (schemas, columns) = try await (schemasResult, columnsResult)
+                guard !Task.isCancelled else { return }
+                completionCatalogs[key] = CompletionCatalog(schemas: schemas, columns: columns)
+            } catch {
+                // Not fatal: the editor just won't offer schema-aware completion.
+            }
+            completionCatalogTasks[key] = nil
+        }
+    }
+
+    private func invalidateCompletionCatalog(for connection: ConnectionConfig) {
+        let key = connection.driverKey
+        completionCatalogTasks.removeValue(forKey: key)?.cancel()
+        completionCatalogs.removeValue(forKey: key)
+    }
+
+    private func invalidateCompletionCatalogs(of id: ConnectionConfig.ID) {
+        for key in completionCatalogTasks.keys where key.connectionID == id {
+            completionCatalogTasks.removeValue(forKey: key)?.cancel()
+        }
+        completionCatalogs = completionCatalogs.filter { $0.key.connectionID != id }
     }
 
     // MARK: Tabs
@@ -601,6 +651,7 @@ final class AppModel {
         let tab = ScriptTab(connection: connection, title: "Script \(scriptCounter)", text: "")
         insertAfterActive(.script(tab))
         activeTabID = tab.id
+        loadCompletionCatalogIfNeeded(for: connection)
     }
 
     func close(_ id: UUID) {
