@@ -60,6 +60,29 @@ final class ScriptTab: Identifiable {
     /// New scripts focus the editor the first time they're shown.
     var needsInitialFocus = true
     var search = ""
+    /// Editor selection (UTF-16 ranges). Not observed: it changes on every caret move.
+    @ObservationIgnored var selectedRanges: [NSRange] = []
+    /// Something non-blank is selected, so ⌘↩ runs just that. Only flips when it changes.
+    var hasSelection = false
+
+    func updateSelection(_ ranges: [NSRange]) {
+        selectedRanges = ranges
+        let has = selectedSQL != nil
+        if has != hasSelection { hasSelection = has }
+    }
+
+    /// Selected text (multiple selections joined by newlines), or `nil` if nothing non-blank is selected.
+    var selectedSQL: String? {
+        let ns = text as NSString
+        let parts = selectedRanges
+            .filter { $0.length > 0 && NSMaxRange($0) <= ns.length }
+            .map { ns.substring(with: $0) }
+        let sql = parts.joined(separator: "\n")
+        return sql.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : sql
+    }
+
+    /// What ⌘↩ executes: the selection if there is one, otherwise the whole script.
+    var sqlToRun: String { selectedSQL ?? text }
 
     init(connection: ConnectionConfig, title: String, text: String) {
         self.connection = connection
@@ -555,7 +578,7 @@ final class AppModel {
         let clock = ContinuousClock()
         let start = clock.now
         do {
-            let result = try await driver(for: tab.connection).execute(tab.text, maxRows: scriptRowLimit)
+            let result = try await driver(for: tab.connection).execute(tab.sqlToRun, maxRows: scriptRowLimit)
             tab.lastDuration = clock.now - start
             tab.result = .loaded(result)
         } catch DatabaseError.cancelled {

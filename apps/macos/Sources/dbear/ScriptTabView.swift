@@ -15,7 +15,9 @@ struct ScriptTabView: View {
                     text: $tab.text,
                     focusOnAppear: consumeInitialFocus(),
                     fontSize: model.editorFontSize,
-                    onZoomIn: { model.zoomEditor(by: 1) }
+                    onZoomIn: { model.zoomEditor(by: 1) },
+                    initialSelection: tab.selectedRanges,
+                    onSelectionChange: { [tab] in tab.updateSelection($0) }
                 )
             }
         } bottom: {
@@ -51,10 +53,10 @@ struct ScriptTabView: View {
                 Button {
                     Task { await model.run(tab) }
                 } label: {
-                    Label("Run", systemImage: "play.fill")
+                    Label(tab.hasSelection ? "Run Selection" : "Run", systemImage: "play.fill")
                 }
                 .keyboardShortcut(.return, modifiers: .command)
-                .help("Run Script (⌘↩)")
+                .help(tab.hasSelection ? "Run Selected SQL (⌘↩)" : "Run Script (⌘↩)")
             }
         }
         .padding(.horizontal, 12)

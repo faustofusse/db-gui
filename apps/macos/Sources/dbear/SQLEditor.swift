@@ -10,8 +10,14 @@ struct SQLEditor: NSViewRepresentable {
     var fontSize: CGFloat = NSFont.systemFontSize
     /// ⌘= (the unshifted ⌘+ on US layouts) while the editor has focus; the menu handles ⌘+ and ⌘-.
     var onZoomIn: () -> Void = {}
+    /// Selection to restore when the editor is created (e.g. switching back to the tab).
+    var initialSelection: [NSRange] = []
+    /// Selected UTF-16 ranges whenever the selection or caret moves.
+    var onSelectionChange: ([NSRange]) -> Void = { _ in }
 
-    func makeCoordinator() -> Coordinator { Coordinator(text: $text, theme: SQLTheme(fontSize: fontSize)) }
+    func makeCoordinator() -> Coordinator {
+        Coordinator(text: $text, theme: SQLTheme(fontSize: fontSize), onSelectionChange: onSelectionChange)
+    }
 
     func makeNSView(context: Context) -> NSScrollView {
         let scrollView = SQLTextView.scrollableTextView()
@@ -37,6 +43,8 @@ struct SQLEditor: NSViewRepresentable {
         textView.isAutomaticLinkDetectionEnabled = false
         textView.isAutomaticDataDetectionEnabled = false
         textView.textContainerInset = NSSize(width: 10, height: 8)
+        // Only tint the background, so selected SQL keeps its syntax colors (like Xcode).
+        textView.selectedTextAttributes = [.backgroundColor: NSColor.selectedTextBackgroundColor]
         let theme = context.coordinator.theme
         textView.font = theme.font
         textView.typingAttributes = theme.baseAttributes
@@ -44,6 +52,11 @@ struct SQLEditor: NSViewRepresentable {
         textView.string = text
         context.coordinator.textView = textView
         context.coordinator.highlight()
+        let length = (text as NSString).length
+        let restored = initialSelection.filter { NSMaxRange($0) <= length }
+        if !focusOnAppear, !restored.isEmpty {
+            textView.selectedRanges = restored.map { NSValue(range: $0) }
+        }
 
         if focusOnAppear {
             // Not in a window yet; wait a run loop turn.
@@ -59,6 +72,7 @@ struct SQLEditor: NSViewRepresentable {
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         let coordinator = context.coordinator
         coordinator.text = $text
+        coordinator.onSelectionChange = onSelectionChange
         guard let textView = coordinator.textView as? SQLTextView else { return }
         textView.onZoomIn = onZoomIn
         if coordinator.theme.fontSize != fontSize {
@@ -79,12 +93,19 @@ struct SQLEditor: NSViewRepresentable {
     final class Coordinator: NSObject, NSTextViewDelegate {
         var text: Binding<String>
         var theme: SQLTheme
+        var onSelectionChange: ([NSRange]) -> Void
         weak var textView: NSTextView?
         private var generation = 0
 
-        init(text: Binding<String>, theme: SQLTheme) {
+        init(text: Binding<String>, theme: SQLTheme, onSelectionChange: @escaping ([NSRange]) -> Void) {
             self.text = text
             self.theme = theme
+            self.onSelectionChange = onSelectionChange
+        }
+
+        func textViewDidChangeSelection(_ notification: Notification) {
+            guard let textView else { return }
+            onSelectionChange(textView.selectedRanges.map(\.rangeValue))
         }
 
         func textDidChange(_ notification: Notification) {
