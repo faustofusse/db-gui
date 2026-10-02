@@ -81,7 +81,7 @@ async fn connect(config: &ConnectionConfig) -> Result<Client> {
         .port(config.port.unwrap_or(5432))
         .dbname(&config.database)
         .user(config.user.as_deref().unwrap_or("postgres"))
-        .application_name("DBGui")
+        .application_name("dbear")
         .connect_timeout(CONNECT_TIMEOUT)
         .ssl_mode(match config.ssl_mode {
             SslMode::Disable => tokio_postgres::config::SslMode::Disable,

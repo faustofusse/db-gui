@@ -22,17 +22,40 @@ public struct KeychainError: Error, LocalizedError {
 /// Generic passwords in the login Keychain, one per connection id.
 public struct KeychainSecretStore: SecretStore {
     public let service: String
+    /// Services used by earlier builds (old app name / bundle id). Passwords found there move to `service`.
+    public let legacyServices: [String]
 
-    public init(service: String = "dev.fausto.dbgui.connection") {
+    public init(
+        service: String = "ar.fausto.dbear.connection",
+        legacyServices: [String] = ["dev.fausto.dbear.connection", "dev.fausto.dbgui.connection"]
+    ) {
         self.service = service
+        self.legacyServices = legacyServices
     }
 
-    private func query(_ id: String) -> [CFString: Any] {
-        [kSecClass: kSecClassGenericPassword, kSecAttrService: service, kSecAttrAccount: id]
+    private func query(_ id: String, service: String? = nil) -> [CFString: Any] {
+        [kSecClass: kSecClassGenericPassword, kSecAttrService: service ?? self.service, kSecAttrAccount: id]
     }
 
     public func password(for id: String) -> String? {
-        var q = query(id)
+        if let password = read(query(id)) { return password }
+        // Saved by an earlier build: move it over, so this only happens once.
+        for legacy in legacyServices {
+            guard let password = read(query(id, service: legacy)) else { continue }
+            if (try? setPassword(password, for: id)) != nil {
+                SecItemDelete(query(id, service: legacy) as CFDictionary)
+            }
+            return password
+        }
+        return nil
+    }
+
+    public func hasPassword(for id: String) -> Bool {
+        exists(query(id)) || legacyServices.contains { exists(query(id, service: $0)) }
+    }
+
+    private func read(_ query: [CFString: Any]) -> String? {
+        var q = query
         q[kSecReturnData] = true
         q[kSecMatchLimit] = kSecMatchLimitOne
         var out: AnyObject?
@@ -40,8 +63,8 @@ public struct KeychainSecretStore: SecretStore {
         return String(data: data, encoding: .utf8)
     }
 
-    public func hasPassword(for id: String) -> Bool {
-        var q = query(id)
+    private func exists(_ query: [CFString: Any]) -> Bool {
+        var q = query
         q[kSecReturnAttributes] = true
         q[kSecMatchLimit] = kSecMatchLimitOne
         return SecItemCopyMatching(q as CFDictionary, nil) == errSecSuccess
@@ -53,7 +76,7 @@ public struct KeychainSecretStore: SecretStore {
         if status == errSecItemNotFound {
             var item = query(id)
             item[kSecValueData] = data
-            item[kSecAttrLabel] = "DBGui connection"
+            item[kSecAttrLabel] = "dbear connection"
             let added = SecItemAdd(item as CFDictionary, nil)
             guard added == errSecSuccess else { throw KeychainError(status: added) }
         } else if status != errSecSuccess {
@@ -63,6 +86,7 @@ public struct KeychainSecretStore: SecretStore {
 
     public func deletePassword(for id: String) {
         SecItemDelete(query(id) as CFDictionary)
+        for legacy in legacyServices { SecItemDelete(query(id, service: legacy) as CFDictionary) }
     }
 }
 

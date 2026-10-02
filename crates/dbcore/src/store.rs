@@ -74,20 +74,34 @@ impl From<StoredConnection> for ConnectionConfig {
     }
 }
 
-/// `~/Library/Application Support/DBGui/connections.json` on macOS,
-/// `$XDG_CONFIG_HOME/dbgui/connections.json` (or `~/.config/…`) elsewhere.
+/// `~/Library/Application Support/dbear/connections.json` on macOS,
+/// `$XDG_CONFIG_HOME/dbear/connections.json` (or `~/.config/…`) elsewhere.
 pub fn default_path() -> Option<PathBuf> {
+    Some(config_dir("dbear")?.join("connections.json"))
+}
+
+/// The app was called DBGui before; its folder is moved over on first use.
+const LEGACY_DIR_NAME: &str = if cfg!(target_os = "macos") { "DBGui" } else { "dbgui" };
+
+fn config_dir(name: &str) -> Option<PathBuf> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    let dir = if cfg!(target_os = "macos") {
-        home?.join("Library/Application Support/DBGui")
+    let base = if cfg!(target_os = "macos") {
+        home?.join("Library/Application Support")
     } else {
         std::env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
             .filter(|p| p.is_absolute())
             .or_else(|| home.map(|h| h.join(".config")))?
-            .join("dbgui")
     };
-    Some(dir.join("connections.json"))
+    Some(base.join(name))
+}
+
+/// Moves `legacy` to `current` when only the legacy folder exists. Best effort: on failure the
+/// old folder stays where it is and the app starts with an empty store.
+fn migrate_dir(legacy: &Path, current: &Path) {
+    if legacy.is_dir() && !current.exists() {
+        let _ = fs::rename(legacy, current);
+    }
 }
 
 /// A new unique connection id.
@@ -101,6 +115,15 @@ pub struct ConnectionStore {
 }
 
 impl ConnectionStore {
+    /// Opens the store at [`default_path`], first moving over the folder from the app's old name.
+    pub fn open_default() -> Result<Self> {
+        let path = default_path().ok_or_else(|| Error::Storage("no home directory".into()))?;
+        if let (Some(legacy), Some(dir)) = (config_dir(LEGACY_DIR_NAME), path.parent()) {
+            migrate_dir(&legacy, dir);
+        }
+        Self::open(path)
+    }
+
     /// Loads the file at `path`. A missing file is an empty store (created on first save).
     pub fn open(path: impl Into<PathBuf>) -> Result<Self> {
         let path = path.into();
@@ -110,7 +133,7 @@ impl ConnectionStore {
                     .map_err(|e| Error::Storage(format!("{} is not valid: {e}", path.display())))?;
                 if file.version > FORMAT_VERSION {
                     return Err(Error::Storage(format!(
-                        "{} was written by a newer version of DBGui",
+                        "{} was written by a newer version of dbear",
                         path.display()
                     )));
                 }
@@ -261,11 +284,26 @@ mod tests {
     }
 
     #[test]
+    fn migrates_the_legacy_folder_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let (legacy, current) = (dir.path().join("DBGui"), dir.path().join("dbear"));
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(legacy.join("connections.json"), r#"{"version": 1, "connections": []}"#).unwrap();
+        migrate_dir(&legacy, &current);
+        assert!(!legacy.exists() && current.join("connections.json").exists());
+
+        // Never overwrites an existing folder.
+        fs::create_dir_all(&legacy).unwrap();
+        migrate_dir(&legacy, &current);
+        assert!(legacy.exists());
+    }
+
+    #[test]
     fn default_path_is_platform_specific() {
         let p = default_path().unwrap();
         assert!(p.ends_with("connections.json"));
         if cfg!(target_os = "macos") {
-            assert!(p.to_string_lossy().contains("Library/Application Support/DBGui"));
+            assert!(p.to_string_lossy().contains("Library/Application Support/dbear"));
         }
     }
 }

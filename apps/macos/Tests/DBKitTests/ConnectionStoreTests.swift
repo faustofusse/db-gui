@@ -4,7 +4,7 @@ import Testing
 
 private func tempStorePath() -> String {
     FileManager.default.temporaryDirectory
-        .appendingPathComponent("dbgui-tests-\(UUID().uuidString)/connections.json").path
+        .appendingPathComponent("dbear-tests-\(UUID().uuidString)/connections.json").path
 }
 
 @Test func storeRoundTripsWithoutPasswords() throws {

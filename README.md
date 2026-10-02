@@ -1,4 +1,6 @@
-# DBGui
+# dbear
+
+<img src="assets/logo.svg" width="96" alt="dbear">
 
 Native database client. macOS frontend in SwiftUI, Linux frontend (later) in GPUI.
 Both share one Rust core.
@@ -14,16 +16,18 @@ tools/
 apps/
   macos/         # SwiftUI app (Swift package)
     Sources/DBKit/      # Swift models + DatabaseDriver protocol; RustDriver adapts the FFI
-    Sources/DBGuiMac/   # UI (Mail-style 3-column NavigationSplitView)
+    Sources/dbear/      # UI (Mail-style 3-column NavigationSplitView)
+    AppIcon.icon/       # Icon Composer source of the app icon
     Sources/DBCoreFFI/  # generated, git-ignored
     Frameworks/         # generated DBCoreFFI.xcframework, git-ignored
   linux/         # GPUI app (todo), depends on crates/dbcore directly
 dev/postgres/init.sql  # seed for the dev database
 scripts/
   build-core.sh      # cargo build dbcore-ffi → xcframework + Swift bindings
-  bundle-mac.sh      # build-core + swift build → build/DBGui.app
+  bundle-mac.sh      # build-core + swift build → build/dbear.app
   dev-db.sh          # dev Postgres in an Apple `container` (up/down/reset/psql/logs)
   test-postgres.sh   # dev-db up + core integration tests
+  logo/trace.sh      # assets/logo.jpeg → SVG logo + icon layers
 ```
 
 ```
@@ -63,22 +67,36 @@ handle: uuid, jsonb, arrays, enums, inet, bytea, intervals, big NUMERICs, views,
 view, a partitioned table, a table without a primary key and an empty schema.
 `./scripts/dev-db.sh reset` recreates it from scratch.
 
+## Icon
+
+`assets/logo.jpeg` is the source artwork. `scripts/logo/trace.sh` turns it into vectors: it
+flattens the image to the logo's three colors, traces it with vtracer, and writes:
+
+- `assets/logo.svg`: the bear on a transparent background
+- `assets/icon.svg`: a classic macOS icon (squircle and bear), for places that need a flat file
+- `apps/macos/AppIcon.icon/Assets/bear.svg`: the bear layer of the Icon Composer icon
+
+`apps/macos/AppIcon.icon` opens in Icon Composer. `bundle-mac.sh` compiles it with `actool`
+into `Assets.car`, which holds the Liquid Glass icon for macOS 26, plus `AppIcon.icns` for older
+systems.
+
 ## Saved connections
 
 - The core (`crates/dbcore/src/store.rs`) keeps connections in a versioned JSON file:
-  `~/Library/Application Support/DBGui/connections.json` on macOS and
-  `$XDG_CONFIG_HOME/dbgui/connections.json` on Linux. Writes are atomic and the file mode is 0600.
+  `~/Library/Application Support/dbear/connections.json` on macOS and
+  `$XDG_CONFIG_HOME/dbear/connections.json` on Linux. Writes are atomic and the file mode is 0600.
 - Passwords never go in that file. The frontend keeps them in the platform keychain (macOS
-  Keychain, service `dev.fausto.dbgui.connection`, account = connection id) and passes them in
+  Keychain, service `ar.fausto.dbear.connection`, account = connection id) and passes them in
   when it connects. The Keychain is only read when a connection opens or a test runs.
 - URL parsing (`postgres://user:pass@host:port/db?sslmode=…`), validation and "Copy URL" also live
   in the core, so every frontend's connection form behaves the same.
 - In the app: **File ▸ New Connection… (⇧⌘N)**, **Edit Connection… (⇧⌘E)**, the sidebar context
   menu (Edit / Duplicate / Copy URL / Delete), and ⌫ to delete the selected connection.
-- Set `DBGUI_CONNECTIONS_FILE=/path/to/file.json` to use a different file, for example
-  `open --env DBGUI_CONNECTIONS_FILE=/tmp/c.json build/DBGui.app`.
-- The app is ad-hoc signed, so after a rebuild macOS may ask once to let DBGui read a saved
-  password. Click "Always Allow".
+- Set `DBEAR_CONNECTIONS_FILE=/path/to/file.json` to use a different file, for example
+  `open --env DBEAR_CONNECTIONS_FILE=/tmp/c.json build/dbear.app`.
+- `bundle-mac.sh` signs with your "Apple Development" identity when there is one
+  (`CODESIGN_IDENTITY` overrides it). The signature then stays the same across rebuilds, so
+  "Always Allow" on the Keychain prompt sticks. Ad-hoc builds trigger the prompt again after every rebuild.
 
 ## Postgres driver
 
@@ -107,8 +125,8 @@ view, a partitioned table, a table without a primary key and an empty schema.
 cargo test -p dbcore                               # core tests (Postgres tests skip themselves)
 ./scripts/test-postgres.sh                         # + integration tests against the dev database
 ./scripts/build-core.sh                            # needed once before opening apps/macos in Xcode
-(cd apps/macos && swift test)                      # Swift ⇄ Rust bridge tests (DBGUI_TEST_POSTGRES=1 for real-db ones)
-./scripts/bundle-mac.sh && open build/DBGui.app    # build + run the macOS app
+(cd apps/macos && swift test)                      # Swift ⇄ Rust bridge tests (DBEAR_TEST_POSTGRES=1 for real-db ones)
+./scripts/bundle-mac.sh && open build/dbear.app    # build + run the macOS app
 ```
 
 Rerun `scripts/build-core.sh` after changing anything in `crates/`. `bundle-mac.sh` does this for you.

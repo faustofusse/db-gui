@@ -1,14 +1,14 @@
 //! Integration tests against the dev Postgres (`scripts/dev-db.sh up`).
-//! Skipped unless `DBGUI_TEST_POSTGRES=1`; `scripts/test-postgres.sh` sets it up.
+//! Skipped unless `DBEAR_TEST_POSTGRES=1`; `scripts/test-postgres.sh` sets it up.
 
 use std::time::{Duration, Instant};
 
 use dbcore::{mock, Connection, ConnectionConfig, Error, SslMode, TableInfo, TableKind, Value};
 
 fn enabled() -> bool {
-    let on = std::env::var("DBGUI_TEST_POSTGRES").is_ok_and(|v| v == "1");
+    let on = std::env::var("DBEAR_TEST_POSTGRES").is_ok_and(|v| v == "1");
     if !on {
-        eprintln!("skipped: set DBGUI_TEST_POSTGRES=1 (scripts/dev-db.sh up)");
+        eprintln!("skipped: set DBEAR_TEST_POSTGRES=1 (scripts/dev-db.sh up)");
     }
     on
 }
@@ -229,7 +229,7 @@ fn dropping_the_future_cancels_on_the_server() {
         return;
     }
     let conn = dev();
-    let marker = "dbgui_drop_test_marker";
+    let marker = "dbear_drop_test_marker";
     block_on(async {
         let sql = format!("select pg_sleep(20) as {marker}");
         let _ = tokio::time::timeout(Duration::from_millis(500), conn.execute(sql)).await;

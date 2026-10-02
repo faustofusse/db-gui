@@ -1,4 +1,4 @@
-//! DBGui shared core.
+//! dbear shared core.
 //!
 //! Everything that isn't UI lives here: models, drivers, value decoding, SQL handling.
 //! - The GPUI (Linux) app depends on this crate directly.

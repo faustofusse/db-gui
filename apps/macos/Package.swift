@@ -4,10 +4,10 @@ import PackageDescription
 // The SwiftUI frontend. All database logic lives in the Rust core (../../crates);
 // run ../../scripts/build-core.sh first to produce DBCoreFFI.xcframework + bindings.
 let package = Package(
-    name: "DBGui",
+    name: "dbear",
     platforms: [.macOS(.v15)],
     products: [
-        .executable(name: "DBGuiMac", targets: ["DBGuiMac"]),
+        .executable(name: "dbear", targets: ["dbear"]),
     ],
     targets: [
         // Rust static library + C header (generated).
@@ -22,7 +22,7 @@ let package = Package(
         ),
         // Swift-facing models + DatabaseDriver protocol; adapts the generated API.
         .target(name: "DBKit", dependencies: ["DBCoreFFI"]),
-        .executableTarget(name: "DBGuiMac", dependencies: ["DBKit"]),
+        .executableTarget(name: "dbear", dependencies: ["DBKit"]),
         .testTarget(name: "DBKitTests", dependencies: ["DBKit"]),
     ]
 )

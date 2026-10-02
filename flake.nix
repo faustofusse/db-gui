@@ -1,5 +1,5 @@
 {
-  description = "DBGui dev shell: Rust core (+ SwiftUI on macOS, GPUI on Linux)";
+  description = "dbear dev shell: Rust core (+ SwiftUI on macOS, GPUI on Linux)";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";

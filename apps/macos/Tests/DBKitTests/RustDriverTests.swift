@@ -11,7 +11,7 @@ private let connections = Drivers.sampleConnections()
 private var devDB: ConnectionConfig { connections.first { $0.id == "local-pg" }! }
 /// Mock Postgres with the sample schema.
 private var appDev: ConnectionConfig { connections.first { $0.id == "staging-pg" }! }
-private let postgresEnabled = ProcessInfo.processInfo.environment["DBGUI_TEST_POSTGRES"] == "1"
+private let postgresEnabled = ProcessInfo.processInfo.environment["DBEAR_TEST_POSTGRES"] == "1"
 
 @Test func loadsSampleConnectionsWithSummary() {
     #expect(connections.count == 6)

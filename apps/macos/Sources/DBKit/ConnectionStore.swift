@@ -10,7 +10,7 @@ public final class ConnectionStore: @unchecked Sendable {
         self.inner = inner
     }
 
-    /// `~/Library/Application Support/DBGui/connections.json`.
+    /// `~/Library/Application Support/dbear/connections.json`.
     public static func openDefault() throws -> ConnectionStore {
         try bridged { ConnectionStore(try DBCoreFFI.ConnectionStore.openDefault()) }
     }

@@ -3,4 +3,4 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ./scripts/dev-db.sh up >/dev/null
-DBGUI_TEST_POSTGRES=1 cargo test -p dbcore "$@"
+DBEAR_TEST_POSTGRES=1 cargo test -p dbcore "$@"

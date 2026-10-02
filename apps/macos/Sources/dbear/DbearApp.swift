@@ -2,9 +2,13 @@ import AppKit
 import SwiftUI
 
 @main
-struct DBGuiApp: App {
+struct DbearApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var model = AppModel()
+
+    init() {
+        ThinScrollers.install()
+    }
 
     var body: some Scene {
         WindowGroup {
@@ -20,6 +24,7 @@ struct DBGuiApp: App {
 /// Needed when launched via `swift run` (no .app bundle): makes it a regular foreground app.
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillFinishLaunching(_ notification: Notification) {
+
         // We draw our own tabs; drop the native window-tab menu items.
         NSWindow.allowsAutomaticWindowTabbing = false
     }

@@ -50,6 +50,8 @@ final class ScriptTab: Identifiable {
     var text: String
     var result: LoadState<QueryResult> = .idle
     var lastDuration: Duration?
+    /// Bumped on every run so the grid knows the result was replaced.
+    var runCount = 0
     /// The last run was stopped by the user.
     var wasCancelled = false
     /// Editor pane height once the user drags the divider; `nil` = half the available height.
@@ -135,8 +137,8 @@ final class AppModel {
     init(store: ConnectionStore? = nil, secrets: any SecretStore = KeychainSecretStore()) {
         self.secrets = secrets
         do {
-            // DBGUI_CONNECTIONS_FILE points at another file (handy for testing).
-            let override = ProcessInfo.processInfo.environment["DBGUI_CONNECTIONS_FILE"]
+            // DBEAR_CONNECTIONS_FILE points at another file (handy for testing).
+            let override = ProcessInfo.processInfo.environment["DBEAR_CONNECTIONS_FILE"]
             self.store = try store ?? override.map(ConnectionStore.open(path:)) ?? ConnectionStore.openDefault()
             connections = self.store?.connections() ?? []
         } catch {
@@ -529,6 +531,7 @@ final class AppModel {
     func run(_ tab: ScriptTab) async {
         guard !tab.result.isLoading else { return }
         tab.result = .loading
+        tab.runCount += 1
         tab.wasCancelled = false
         let clock = ContinuousClock()
         let start = clock.now

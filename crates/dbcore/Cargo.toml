@@ -1,6 +1,6 @@
 [package]
 name = "dbcore"
-description = "Shared, UI-free database core used by every DBGui frontend (SwiftUI via FFI, GPUI directly)."
+description = "Shared, UI-free database core used by every dbear frontend (SwiftUI via FFI, GPUI directly)."
 edition.workspace = true
 version.workspace = true
 license.workspace = true

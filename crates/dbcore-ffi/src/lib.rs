@@ -170,12 +170,10 @@ impl ConnectionStore {
         Ok(Arc::new(Self { inner: Mutex::new(dbcore::ConnectionStore::open(path)?) }))
     }
 
-    /// Opens the store at the platform default location.
+    /// Opens the store at the platform default location (migrating the old DBGui folder).
     #[uniffi::constructor]
     pub fn open_default() -> Result<Arc<Self>, DbError> {
-        let path = dbcore::store::default_path()
-            .ok_or_else(|| DbError::Storage { message: "no home directory".into() })?;
-        Ok(Arc::new(Self { inner: Mutex::new(dbcore::ConnectionStore::open(path)?) }))
+        Ok(Arc::new(Self { inner: Mutex::new(dbcore::ConnectionStore::open_default()?) }))
     }
 
     pub fn path(&self) -> String {

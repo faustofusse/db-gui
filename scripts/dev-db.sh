@@ -11,7 +11,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-NAME=dbgui-postgres
+NAME=dbear-postgres
 IMAGE=postgres:17
 PORT=54329
 

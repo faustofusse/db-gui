@@ -1,30 +1,41 @@
 #!/usr/bin/env bash
-# Builds the Rust core + DBGuiMac and wraps it in a minimal .app bundle at build/DBGui.app
+# Builds the Rust core + dbear and wraps it in a minimal .app bundle at build/dbear.app
 # Usage: scripts/bundle-mac.sh [debug|release]   (Swift config; the Rust core is always built in release)
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CONFIG="${1:-debug}"
 "$ROOT/scripts/build-core.sh" release
 cd "$ROOT/apps/macos"
-swift build -c "$CONFIG" --product DBGuiMac
-BIN="$(swift build -c "$CONFIG" --show-bin-path)/DBGuiMac"
+swift build -c "$CONFIG" --product dbear
+BIN="$(swift build -c "$CONFIG" --show-bin-path)/dbear"
 cd "$ROOT"
-APP=build/DBGui.app
+APP=build/dbear.app
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS"
-cp "$BIN" "$APP/Contents/MacOS/DBGui"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+cp "$BIN" "$APP/Contents/MacOS/dbear"
+# App icon from the Icon Composer file: Assets.car (Liquid Glass icon, macOS 26) + AppIcon.icns fallback.
+xcrun actool apps/macos/AppIcon.icon --compile "$APP/Contents/Resources" --platform macosx \
+  --minimum-deployment-target 15.0 --app-icon AppIcon \
+  --output-partial-info-plist "$ROOT/build/icon-partial.plist" >/dev/null
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-  <key>CFBundleName</key><string>DBGui</string>
-  <key>CFBundleIdentifier</key><string>dev.fausto.dbgui</string>
-  <key>CFBundleExecutable</key><string>DBGui</string>
+  <key>CFBundleName</key><string>dbear</string>
+  <key>CFBundleDisplayName</key><string>dbear</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
+  <key>CFBundleIconName</key><string>AppIcon</string>
+  <key>CFBundleIdentifier</key><string>ar.fausto.dbear</string>
+  <key>CFBundleExecutable</key><string>dbear</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>0.1.0</string>
   <key>LSMinimumSystemVersion</key><string>15.0</string>
   <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
 PLIST
-codesign --force --sign - "$APP" >/dev/null
+# Sign with a stable identity when there is one, so Keychain "Always Allow" survives rebuilds
+# (an ad-hoc signature changes every build and macOS asks again). Override with CODESIGN_IDENTITY.
+IDENTITY="${CODESIGN_IDENTITY:-$(security find-identity -p codesigning -v 2>/dev/null | sed -n 's/.*"\(Apple Development:[^"]*\)".*/\1/p' | head -1)}"
+codesign --force --sign "${IDENTITY:--}" "$APP" >/dev/null
+echo "signed: ${IDENTITY:-ad-hoc}"
 echo "$APP"

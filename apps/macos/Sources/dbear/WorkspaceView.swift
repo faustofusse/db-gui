@@ -234,7 +234,7 @@ private struct TableTabView: View {
                                    description: Text(message))
         case .loaded(let result):
             DataGrid(
-                result: result, search: tab.search,
+                result: result, search: tab.search, version: tab.generation,
                 paging: GridPaging(
                     hasMore: !tab.reachedEnd, isLoading: tab.isLoadingMore, error: tab.loadMoreError,
                     loadMore: { Task { await model.loadMore(tab) } },
