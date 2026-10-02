@@ -24,6 +24,7 @@ struct AppCommands: Commands {
         CommandGroup(after: .newItem) {
             Button("New Connection…") { model.newConnection() }
                 .keyboardShortcut("n", modifiers: [.command, .shift])
+            Button("Import from DBeaver…") { model.showingImport = true }
             Button("Edit Connection…") {
                 if let c = model.selectedConnection { model.edit(c) }
             }

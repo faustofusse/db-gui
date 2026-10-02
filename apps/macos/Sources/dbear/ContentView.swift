@@ -19,6 +19,9 @@ struct ContentView: View {
         .sheet(item: $model.editor) { request in
             ConnectionEditor(original: request.original)
         }
+        .sheet(isPresented: $model.showingImport) {
+            ImportConnectionsSheet()
+        }
         .confirmationDialog(
             "Delete “\(model.pendingDeletion?.name ?? "")”?",
             isPresented: Binding(get: { model.pendingDeletion != nil }, set: { if !$0 { model.pendingDeletion = nil } }),

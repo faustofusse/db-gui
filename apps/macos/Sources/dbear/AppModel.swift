@@ -168,6 +168,8 @@ final class AppModel {
     var storeError: String?
     /// The open "New / Edit Connection" sheet.
     var editor: ConnectionEditorRequest?
+    /// The "Import from DBeaver" sheet is open.
+    var showingImport = false
     /// Connection waiting for delete confirmation.
     var pendingDeletion: ConnectionConfig?
 

@@ -9,6 +9,7 @@ mod connection;
 pub mod dialect;
 pub mod driver;
 pub mod highlight;
+pub mod import;
 pub mod mock;
 pub mod model;
 pub mod mysql;

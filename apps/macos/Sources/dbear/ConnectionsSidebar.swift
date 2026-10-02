@@ -37,7 +37,10 @@ struct ConnectionsSidebar: View {
         .onDeleteCommand {
             if let selected = model.selectedConnection { model.pendingDeletion = selected }
         }
-        .contextMenu { Button("New Connection…") { model.newConnection() } }
+        .contextMenu {
+            Button("New Connection…") { model.newConnection() }
+            Button("Import from DBeaver…") { model.showingImport = true }
+        }
         .overlay { emptyState }
         .bottomBar { newConnectionButton }
     }
@@ -61,6 +64,9 @@ struct ConnectionsSidebar: View {
         } else if model.connections.isEmpty {
             SidebarMessage(title: "No Connections", message: "Add a database to get started.") {
                 Button("New Connection…") { model.newConnection() }
+                if DBeaverImport.isInstalled {
+                    Button("Import from DBeaver…") { model.showingImport = true }
+                }
             }
         }
     }
