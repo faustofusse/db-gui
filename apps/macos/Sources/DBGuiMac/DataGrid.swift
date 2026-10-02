@@ -1,4 +1,4 @@
-import DBCore
+import DBKit
 import SwiftUI
 
 private struct IndexedColumn: Identifiable {
@@ -60,7 +60,7 @@ private struct CellView: View {
         switch value {
         case .null:
             Text("NULL").foregroundStyle(.tertiary).italic()
-        case .int, .double:
+        case .int, .double, .decimal:
             Text(value.displayString).frame(maxWidth: .infinity, alignment: .trailing)
         case .bool(let b):
             Text(value.displayString).foregroundStyle(b ? .primary : .secondary)

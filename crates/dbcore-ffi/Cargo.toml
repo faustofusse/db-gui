@@ -1,0 +1,17 @@
+[package]
+name = "dbcore-ffi"
+description = "UniFFI bindings for dbcore (consumed by the SwiftUI app)."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[lib]
+name = "dbcore_ffi"
+# staticlib: linked into the macOS app via an xcframework.
+# cdylib: only used by uniffi-bindgen to read interface metadata.
+crate-type = ["staticlib", "cdylib"]
+
+[dependencies]
+dbcore.workspace = true
+uniffi.workspace = true
+thiserror.workspace = true

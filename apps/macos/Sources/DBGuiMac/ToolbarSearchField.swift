@@ -30,6 +30,7 @@ struct ToolbarSearchField: NSViewRepresentable {
 
     func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
 
+    @MainActor
     final class Coordinator: NSObject, NSSearchFieldDelegate {
         var parent: ToolbarSearchField
         var lastFocusRequest: Int

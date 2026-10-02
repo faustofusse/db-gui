@@ -1,0 +1,12 @@
+[package]
+name = "dbcore"
+description = "Shared, UI-free database core used by every DBGui frontend (SwiftUI via FFI, GPUI directly)."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "macros"] }
+async-trait.workspace = true
+thiserror.workspace = true
+regex.workspace = true

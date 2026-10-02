@@ -1,6 +1,6 @@
 import Foundation
 
-public enum DatabaseKind: String, Sendable, Hashable, CaseIterable, Codable {
+public enum DatabaseKind: String, Sendable, Hashable, CaseIterable {
     case postgres
     case mysql
     case sqlite
@@ -14,7 +14,7 @@ public enum DatabaseKind: String, Sendable, Hashable, CaseIterable, Codable {
     }
 }
 
-public struct ConnectionConfig: Identifiable, Hashable, Sendable, Codable {
+public struct ConnectionConfig: Identifiable, Hashable, Sendable {
     public let id: String
     public var name: String
     public var group: String
@@ -23,10 +23,12 @@ public struct ConnectionConfig: Identifiable, Hashable, Sendable, Codable {
     public var port: Int?
     public var database: String
     public var user: String?
+    /// e.g. "PostgreSQL · localhost:5432/app_dev" (formatted by the Rust core).
+    public var summary: String
 
     public init(
         id: String, name: String, group: String, kind: DatabaseKind,
-        host: String, port: Int? = nil, database: String, user: String? = nil
+        host: String, port: Int? = nil, database: String, user: String? = nil, summary: String = ""
     ) {
         self.id = id
         self.name = name
@@ -36,18 +38,11 @@ public struct ConnectionConfig: Identifiable, Hashable, Sendable, Codable {
         self.port = port
         self.database = database
         self.user = user
-    }
-
-    /// e.g. "PostgreSQL · localhost:5432/app_dev"
-    public var summary: String {
-        let address = port.map { "\(host):\($0)" } ?? host
-        return kind == .sqlite
-            ? "\(kind.displayName) · \(database)"
-            : "\(kind.displayName) · \(address)/\(database)"
+        self.summary = summary
     }
 }
 
-public enum TableKind: String, Sendable, Hashable, Codable {
+public enum TableKind: String, Sendable, Hashable {
     case table
     case view
 }
@@ -99,6 +94,8 @@ public enum DBValue: Hashable, Sendable {
     case bool(Bool)
     case int(Int64)
     case double(Double)
+    /// Exact numeric (NUMERIC/DECIMAL) kept as text to avoid precision loss.
+    case decimal(String)
     case text(String)
 
     public var isNull: Bool { if case .null = self { true } else { false } }
@@ -108,8 +105,8 @@ public enum DBValue: Hashable, Sendable {
         case .null: "NULL"
         case .bool(let b): b ? "true" : "false"
         case .int(let i): String(i)
-        case .double(let d): String(format: "%.2f", d)
-        case .text(let s): s
+        case .double(let d): String(d)
+        case .decimal(let s), .text(let s): s
         }
     }
 }

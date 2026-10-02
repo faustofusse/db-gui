@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
-# Builds DBGuiMac and wraps it in a minimal .app bundle at build/DBGui.app
+# Builds the Rust core + DBGuiMac and wraps it in a minimal .app bundle at build/DBGui.app
+# Usage: scripts/bundle-mac.sh [debug|release]   (Swift config; the Rust core is always built in release)
 set -euo pipefail
-cd "$(dirname "$0")/.."
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CONFIG="${1:-debug}"
+"$ROOT/scripts/build-core.sh" release
+cd "$ROOT/apps/macos"
 swift build -c "$CONFIG" --product DBGuiMac
 BIN="$(swift build -c "$CONFIG" --show-bin-path)/DBGuiMac"
+cd "$ROOT"
 APP=build/DBGui.app
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"

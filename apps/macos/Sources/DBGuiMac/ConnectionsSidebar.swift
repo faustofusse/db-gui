@@ -1,4 +1,4 @@
-import DBCore
+import DBKit
 import SwiftUI
 
 struct ConnectionsSidebar: View {

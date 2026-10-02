@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+members = ["crates/dbcore", "crates/dbcore-ffi", "tools/uniffi-bindgen"]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "MIT"
+
+[workspace.dependencies]
+dbcore = { path = "crates/dbcore" }
+uniffi = "0.32"
+tokio = { version = "1", default-features = false }
+async-trait = "0.1"
+thiserror = "2"
+regex = "1"
+
+[profile.release]
+lto = "thin"

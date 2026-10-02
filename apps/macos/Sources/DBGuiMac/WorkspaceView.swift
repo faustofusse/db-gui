@@ -1,4 +1,4 @@
-import DBCore
+import DBKit
 import SwiftUI
 
 /// Right-hand pane: a tab strip with table and SQL script tabs.

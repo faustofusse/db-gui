@@ -4,18 +4,22 @@ public enum DatabaseError: Error, Sendable, LocalizedError {
     case connectionFailed(String)
     case tableNotFound(String)
     case unsupported(String)
+    case query(String)
+    case `internal`(String)
 
     public var errorDescription: String? {
         switch self {
         case .connectionFailed(let msg): "Connection failed: \(msg)"
         case .tableNotFound(let name): "Table not found: \(name)"
         case .unsupported(let what): "Unsupported: \(what)"
+        case .query(let msg): msg
+        case .internal(let msg): "Internal error: \(msg)"
         }
     }
 }
 
-/// The single boundary every frontend talks to.
-/// Real drivers (Postgres, MySQL, SQLite) implement this; UIs never see wire protocols.
+/// The boundary the SwiftUI app talks to. Backed by the Rust core (`RustDriver`);
+/// other conformances (e.g. previews) can stand in without touching the UI.
 public protocol DatabaseDriver: Sendable {
     var config: ConnectionConfig { get }
     func connect() async throws
@@ -26,8 +30,14 @@ public protocol DatabaseDriver: Sendable {
 }
 
 public enum Drivers {
-    /// Returns the driver for a connection. Everything is mocked for now.
     public static func make(for config: ConnectionConfig) -> any DatabaseDriver {
-        MockDriver(config: config)
+        RustDriver(config: config)
     }
+
+    /// Hardcoded connections provided by the core until real connection storage exists.
+    public static func sampleConnections() -> [ConnectionConfig] {
+        RustDriver.sampleConnections()
+    }
+
+    public static var coreVersion: String { RustDriver.coreVersion }
 }

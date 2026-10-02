@@ -1,4 +1,4 @@
-import DBCore
+import DBKit
 import Foundation
 import Observation
 
@@ -92,7 +92,7 @@ enum WorkspaceTab: Identifiable {
 @Observable
 @MainActor
 final class AppModel {
-    var connections: [ConnectionConfig] = MockData.connections
+    var connections: [ConnectionConfig] = Drivers.sampleConnections()
     var selectedConnectionID: ConnectionConfig.ID?
 
     var schemas: LoadState<[Schema]> = .idle
