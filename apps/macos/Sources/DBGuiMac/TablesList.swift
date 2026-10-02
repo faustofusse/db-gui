@@ -98,7 +98,7 @@ struct TablesList: View {
                     if let table = model.table(withID: id) { model.openTable(table, pinned: false) }
                 }
                 .onChange(of: model.selectedTableID) { _, id in
-                    if let id { withAnimation { proxy.scrollTo(id) } }
+                    if let id { proxy.scrollTo(id) }
                 }
                 }
             }

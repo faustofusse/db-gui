@@ -52,6 +52,8 @@ struct WorkspaceView: View {
                 case nil: EmptyPlaceholder(text: "No Tab Selected")
                 }
             }
+            // Tab switches, opens and closes are instant: no implicit or inherited animations.
+            .transaction { $0.disablesAnimations = true; $0.animation = nil }
         }
     }
 }
@@ -88,8 +90,6 @@ private struct TabStrip: View {
         .padding(.horizontal, 10)
         .padding(.top, 4)
         .padding(.bottom, 6)
-        .animation(.snappy(duration: 0.2), value: model.tabs.map(\.id))
-        .animation(.snappy(duration: 0.15), value: model.activeTabID)
     }
 
     private func isHighlighted(_ id: UUID) -> Bool {

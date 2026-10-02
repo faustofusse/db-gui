@@ -17,10 +17,12 @@ struct ScriptTabView: View {
                     .padding(.horizontal, 8)
                     .padding(.vertical, 6)
             }
-            .frame(minHeight: 160, idealHeight: 220, maxHeight: .infinity)
+            // VSplitView sizes panes to their content; force full width so the
+            // layout doesn't shift when the result state changes.
+            .frame(maxWidth: .infinity, minHeight: 160, idealHeight: 220, maxHeight: .infinity)
 
             results
-                .frame(minHeight: 150, idealHeight: 600, maxHeight: .infinity)
+                .frame(maxWidth: .infinity, minHeight: 150, idealHeight: 600, maxHeight: .infinity)
                 .layoutPriority(1)
         }
     }
@@ -66,8 +68,13 @@ struct ScriptTabView: View {
             ProgressView().controlSize(.small)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         case .failed(let message):
-            ContentUnavailableView("Query Failed", systemImage: "exclamationmark.triangle",
-                                   description: Text(message).font(.system(.body, design: .monospaced)))
+            ContentUnavailableView {
+                Label("Query Failed", systemImage: "exclamationmark.triangle")
+            } description: {
+                Text(message)
+                    .font(.system(.body, design: .monospaced))
+                    .textSelection(.enabled)
+            }
         case .loaded(let result) where result.columns.isEmpty:
             // INSERT/UPDATE/DDL: nothing to show in a grid.
             VStack(spacing: 6) {
