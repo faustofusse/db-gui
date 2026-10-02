@@ -31,8 +31,8 @@ gh release create "$TAG" "$ZIP" "$ZIP.sha256" --title "dbear $VERSION" --generat
 Apple silicon, macOS 15 or later.
 
 1. Download the zip, unzip it and move `dbear.app` to `/Applications`.
-2. The app is not notarized, so macOS blocks it the first time. Either right-click › Open, allow it in
-   System Settings › Privacy & Security › "Open Anyway", or run:
+2. The app is not notarized, so macOS blocks it the first time ("Apple could not verify..."). Click
+   Done, then open System Settings › Privacy & Security, scroll down and click "Open Anyway". Or run:
    `xattr -dr com.apple.quarantine /Applications/dbear.app`
 EOF
 )"
