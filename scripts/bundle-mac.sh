@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Builds the Rust core + dbear and wraps it in a minimal .app bundle at build/dbear.app
-# Usage: scripts/bundle-mac.sh [debug|release]   (Swift config; the Rust core is always built in release)
+# Usage: [VERSION=x.y.z] scripts/bundle-mac.sh [debug|release]   (Swift config; the Rust core is always built in release)
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CONFIG="${1:-debug}"
+VERSION="${VERSION:-0.1.0}"
 "$ROOT/scripts/build-core.sh" release
 cd "$ROOT/apps/macos"
 swift build -c "$CONFIG" --product dbear
@@ -28,7 +29,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleIdentifier</key><string>ar.fausto.dbear</string>
   <key>CFBundleExecutable</key><string>dbear</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.1.0</string>
+  <key>CFBundleShortVersionString</key><string>$VERSION</string>
+  <key>CFBundleVersion</key><string>$VERSION</string>
   <key>LSMinimumSystemVersion</key><string>15.0</string>
   <key>NSHighResolutionCapable</key><true/>
 </dict></plist>

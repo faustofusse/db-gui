@@ -15,6 +15,11 @@ nix develop                                       # Rust toolchain (Xcode provid
 
 In debug builds, **File ▸ Add Sample Connections** adds `app_dev` plus some mock connections.
 
+### Releases
+
+`./scripts/release-mac.sh 0.1.0` builds `build/dbear-0.1.0-macos-arm64.zip`. Add `--publish` to tag
+`v0.1.0`, push the tag and create the GitHub release with the zip attached (needs a clean tree and `gh`).
+
 ### Without Nix
 
 You don't need Nix; it just pins the exact toolchain. Install equivalents yourself:
