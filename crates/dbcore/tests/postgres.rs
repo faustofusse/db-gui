@@ -32,6 +32,26 @@ fn column<'a>(result: &'a dbcore::QueryResult, name: &str) -> Vec<&'a Value> {
 }
 
 #[test]
+fn lists_databases_and_browses_another_one() {
+    if !enabled() {
+        return;
+    }
+    let dbs = block_on(dev().list_databases()).unwrap();
+    assert!(dbs.contains(&"app_dev".to_string()) && dbs.contains(&"postgres".to_string()), "{dbs:?}");
+    assert!(!dbs.iter().any(|d| d.starts_with("template")));
+    // Same login, other database: a separate Connection.
+    let other = Connection::new(dev_config().with_database("postgres"));
+    let result = block_on(other.execute("select current_database()".into())).unwrap();
+    assert_eq!(result.rows[0][0], Value::Text("postgres".into()));
+
+    // No database configured: the server's `postgres` database.
+    let unset = Connection::new(ConnectionConfig { database: String::new(), ..dev_config() });
+    let result = block_on(unset.execute("select current_database()".into())).unwrap();
+    assert_eq!(result.rows[0][0], Value::Text("postgres".into()));
+    assert!(block_on(unset.list_databases()).unwrap().contains(&"app_dev".to_string()));
+}
+
+#[test]
 fn lists_schemas_and_relations() {
     if !enabled() {
         return;

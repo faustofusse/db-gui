@@ -46,11 +46,16 @@ struct WorkspaceView: View {
         } else {
             VStack(spacing: 0) {
                 TabStrip()
-                switch model.activeTab {
-                case .table(let tab): TableTabView(tab: tab).id(tab.id)
-                case .script(let tab): ScriptTabView(tab: tab).id(tab.id)
-                case nil: EmptyPlaceholder(text: "No Tab Selected")
+                Group {
+                    switch model.activeTab {
+                    case .table(let tab): TableTabView(tab: tab).id(tab.id)
+                    case .script(let tab): ScriptTabView(tab: tab).id(tab.id)
+                    case nil: EmptyPlaceholder(text: "No Tab Selected")
+                    }
                 }
+                // Whatever a tab shows (even a small error message) fills the pane,
+                // so the tab strip always stays at the top.
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             // Tab switches, opens and closes are instant: no implicit or inherited animations.
             .transaction { $0.disablesAnimations = true; $0.animation = nil }
@@ -156,7 +161,7 @@ private struct TabItem: View {
         .onHover { hovered = $0 }
         .onTapGesture { model.activate(tab.id) }
         .simultaneousGesture(TapGesture(count: 2).onEnded { model.pin(tab.id) })
-        .help("\(tab.connection.name) · \(tooltip)")
+        .help("\(model.displayName(of: tab.connection)) · \(tooltip)")
         .contextMenu {
             if tab.isPreview {
                 Button("Keep Open") { model.pin(tab.id) }
@@ -230,8 +235,14 @@ private struct TableTabView: View {
             ProgressView().controlSize(.small)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         case .failed(let message):
-            ContentUnavailableView("Couldn’t Load Rows", systemImage: "exclamationmark.triangle",
-                                   description: Text(message))
+            ContentUnavailableView {
+                Label("Couldn’t Load Rows", systemImage: "exclamationmark.triangle")
+            } description: {
+                Text(message).textSelection(.enabled)
+            } actions: {
+                Button("Try Again") { Task { await model.load(tab) } }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         case .loaded(let result):
             DataGrid(
                 result: result, search: tab.search, version: tab.generation,

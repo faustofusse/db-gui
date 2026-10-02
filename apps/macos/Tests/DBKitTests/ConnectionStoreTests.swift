@@ -32,8 +32,12 @@ private func tempStorePath() -> String {
 
 @Test func storeRejectsInvalidConfig() throws {
     let store = try ConnectionStore.open(path: tempStorePath())
-    #expect(throws: DatabaseError.self) { try store.upsert(.blank()) }
-    #expect(ConnectionConfig.blank().validationError == "Enter a name for the connection.")
+    var noHost = ConnectionConfig.blank()
+    noHost.host = " "
+    #expect(throws: DatabaseError.self) { try store.upsert(noHost) }
+    #expect(noHost.validationError == "Enter a host.")
+    // Name and database are optional: the name falls back to the host.
+    #expect(try store.upsert(.blank()).name == "localhost")
 }
 
 @Test func parsesConnectionURL() throws {

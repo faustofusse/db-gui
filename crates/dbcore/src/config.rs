@@ -26,15 +26,14 @@ impl ConnectionConfig {
             user: None,
             password: None,
             ssl_mode: SslMode::default(),
+            show_all_databases: kind != DatabaseKind::Sqlite,
         }
     }
 
     /// Checks what the form needs before saving or testing. Returns the first problem found.
     pub fn validate(&self) -> Result<()> {
+        // Name and database are optional (see `default_name` / `default_database`).
         let invalid = |msg: &str| Err(Error::InvalidConfig(msg.into()));
-        if self.name.trim().is_empty() {
-            return invalid("Enter a name for the connection.");
-        }
         if self.kind == DatabaseKind::Sqlite {
             if self.database.trim().is_empty() {
                 return invalid("Choose a database file.");
@@ -47,14 +46,11 @@ impl ConnectionConfig {
         if self.port == Some(0) {
             return invalid("Port must be between 1 and 65535.");
         }
-        if self.database.trim().is_empty() {
-            return invalid("Enter a database name.");
-        }
         Ok(())
     }
 
     /// Parses `postgres://user:pass@host:5432/db?sslmode=require`, `mysql://…` or `sqlite:///path/file.db`.
-    /// The name defaults to the database name; id and group are left empty.
+    /// The name defaults to [`ConnectionConfig::default_name`]; id and group are left empty.
     pub fn from_url(input: &str) -> Result<Self> {
         let invalid = |msg: String| Error::InvalidConfig(msg);
         let url = Url::parse(input.trim()).map_err(|e| invalid(format!("Not a valid connection URL ({e}).")))?;
@@ -89,7 +85,7 @@ impl ConnectionConfig {
                 }
             }
         }
-        config.name = config.database.rsplit('/').next().unwrap_or_default().to_string();
+        config.name = config.default_name();
         Ok(config)
     }
 
@@ -148,6 +144,17 @@ mod tests {
     }
 
     #[test]
+    fn defaults_name_and_database() {
+        let c = ConnectionConfig::from_url("postgres://u@db.example.com:5432").unwrap();
+        assert_eq!((c.name.as_str(), c.database.as_str(), c.default_database()), ("db.example.com", "", "postgres"));
+        assert_eq!(c.summary(), "PostgreSQL · db.example.com:5432");
+        let c = ConnectionConfig::from_url("postgres://u@db.example.com/app").unwrap();
+        assert_eq!((c.name.as_str(), c.default_database()), ("app", "app"));
+        let m = ConnectionConfig::from_url("mysql://root@localhost").unwrap();
+        assert_eq!((m.name.as_str(), m.default_database()), ("localhost", ""));
+    }
+
+    #[test]
     fn rejects_bad_urls() {
         assert!(matches!(ConnectionConfig::from_url("redis://x"), Err(Error::InvalidConfig(_))));
         assert!(matches!(ConnectionConfig::from_url("not a url"), Err(Error::InvalidConfig(_))));
@@ -164,11 +171,10 @@ mod tests {
 
     #[test]
     fn validates_required_fields() {
+        // Name and database are optional for servers.
         let mut c = ConnectionConfig::new_empty(DatabaseKind::Postgres);
-        assert!(c.validate().is_err());
-        c.name = "prod".into();
-        c.database = "app".into();
         assert!(c.validate().is_ok());
+        assert!(ConnectionConfig::new_empty(DatabaseKind::Sqlite).validate().is_err());
         c.port = Some(0);
         assert!(c.validate().is_err());
         c.port = None;

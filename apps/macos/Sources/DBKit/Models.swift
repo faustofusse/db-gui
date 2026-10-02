@@ -34,13 +34,15 @@ public struct ConnectionConfig: Identifiable, Hashable, Sendable {
     /// Comes from the Keychain (later); passed to the core per connection.
     public var password: String?
     public var sslMode: SslMode
+    /// List every database on the server in the sidebar; `database` is the default one.
+    public var showAllDatabases: Bool
     /// e.g. "PostgreSQL · localhost:5432/app_dev" (formatted by the Rust core).
     public var summary: String
 
     public init(
         id: String, name: String, group: String, kind: DatabaseKind,
         host: String, port: Int? = nil, database: String, user: String? = nil,
-        password: String? = nil, sslMode: SslMode = .prefer, summary: String = ""
+        password: String? = nil, sslMode: SslMode = .prefer, showAllDatabases: Bool = true, summary: String = ""
     ) {
         self.id = id
         self.name = name
@@ -52,8 +54,12 @@ public struct ConnectionConfig: Identifiable, Hashable, Sendable {
         self.user = user
         self.password = password
         self.sslMode = sslMode
+        self.showAllDatabases = showAllDatabases
         self.summary = summary
     }
+
+    /// Servers can hold several databases; SQLite files can't.
+    public var supportsMultipleDatabases: Bool { kind != .sqlite }
 }
 
 public enum TableKind: String, Sendable, Hashable {

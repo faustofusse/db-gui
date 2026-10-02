@@ -89,7 +89,8 @@ struct ConnectionEditor: View {
 
     private var generalSection: some View {
         Section {
-            TextField("Name", text: $draft.name, prompt: Text("Required"))
+            // Left empty, the name is the database (or host); the placeholder shows which.
+            TextField("Name", text: $draft.name, prompt: Text(verbatim: draft.defaultName.isEmpty ? "Optional" : draft.defaultName))
             LabeledContent("Group") {
                 HStack(spacing: 4) {
                     TextField("Group", text: $draft.group, prompt: Text("None"))
@@ -126,8 +127,21 @@ struct ConnectionEditor: View {
                 "Port", value: $draft.port, format: .number.grouping(.never),
                 prompt: Text(verbatim: draft.kind.defaultPort.map(String.init) ?? "")
             )
-            TextField("Database", text: $draft.database, prompt: Text("Required"))
+            TextField("Database", text: $draft.database, prompt: Text(verbatim: databasePrompt))
+            if draft.supportsMultipleDatabases {
+                Toggle(isOn: $draft.showAllDatabases) {
+                    Text("Show all databases")
+                    Text("List every database on the server in the sidebar. The one above opens by default.")
+                }
+            }
         }
+    }
+
+    /// SQLite needs its file; servers fall back to their default database.
+    private var databasePrompt: String {
+        if draft.kind == .sqlite { return "Required" }
+        let fallback = ConnectionConfig(id: "", name: "", group: "", kind: draft.kind, host: "", database: "").defaultDatabase
+        return fallback.isEmpty ? "Optional" : "Optional (\(fallback))"
     }
 
     private var authSection: some View {

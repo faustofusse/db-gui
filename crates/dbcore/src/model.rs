@@ -57,6 +57,9 @@ pub struct ConnectionConfig {
     /// Supplied by the frontend from the platform keychain; never persisted by the core.
     pub password: Option<String>,
     pub ssl_mode: SslMode,
+    /// List every database on the server (sidebar), not just `database`.
+    /// `database` stays the one used to connect first and the default selection.
+    pub show_all_databases: bool,
 }
 
 impl std::fmt::Debug for ConnectionConfig {
@@ -72,20 +75,57 @@ impl std::fmt::Debug for ConnectionConfig {
             .field("user", &self.user)
             .field("password", &self.password.as_ref().map(|_| "•••"))
             .field("ssl_mode", &self.ssl_mode)
+            .field("show_all_databases", &self.show_all_databases)
             .finish()
     }
 }
 
 impl ConnectionConfig {
-    /// e.g. "PostgreSQL · localhost:5432/app_dev"
+    /// Whether this kind of database can have siblings on the same server.
+    pub fn supports_multiple_databases(&self) -> bool {
+        self.kind != DatabaseKind::Sqlite
+    }
+
+    /// The same connection pointed at another database on the server.
+    pub fn with_database(&self, database: &str) -> Self {
+        Self { database: database.into(), ..self.clone() }
+    }
+
+    /// The database actually opened. `database` is optional for servers: Postgres then uses its
+    /// `postgres` maintenance database (present on virtually every server), MySQL needs none.
+    pub fn default_database(&self) -> &str {
+        let configured = self.database.trim();
+        match self.kind {
+            DatabaseKind::Postgres if configured.is_empty() => "postgres",
+            _ => configured,
+        }
+    }
+
+    /// Name used when the user leaves it empty: the database (file name for SQLite), else the host.
+    pub fn default_name(&self) -> String {
+        let database = self.database.trim();
+        let host = self.host.trim();
+        match self.kind {
+            DatabaseKind::Sqlite => database.rsplit('/').next().unwrap_or_default().to_string(),
+            _ if !database.is_empty() => database.to_string(),
+            _ => host.to_string(),
+        }
+    }
+
+    /// e.g. "PostgreSQL · localhost:5432/app_dev", or "PostgreSQL · localhost:5432" without a database.
     pub fn summary(&self) -> String {
         let kind = self.kind.display_name();
         if self.kind == DatabaseKind::Sqlite {
             return format!("{kind} · {}", self.database);
         }
-        match self.port {
-            Some(port) => format!("{kind} · {}:{port}/{}", self.host, self.database),
-            None => format!("{kind} · {}/{}", self.host, self.database),
+        let address = match self.port {
+            Some(port) => format!("{}:{port}", self.host),
+            None => self.host.clone(),
+        };
+        if self.database.trim().is_empty() {
+            format!("{kind} · {address}")
+        } else {
+            format!("{kind} · {address}/{}", self.database)
         }
     }
 }

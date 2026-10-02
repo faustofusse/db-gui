@@ -33,6 +33,13 @@ struct StoredConnection {
     user: Option<String>,
     #[serde(default)]
     ssl_mode: SslMode,
+    /// Missing in files written before multi-database support: show them all.
+    #[serde(default = "default_true")]
+    show_all_databases: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Serialize, Deserialize)]
@@ -43,9 +50,10 @@ struct StoreFile {
 
 impl From<&ConnectionConfig> for StoredConnection {
     fn from(c: &ConnectionConfig) -> Self {
+        let name = c.name.trim();
         Self {
             id: c.id.clone(),
-            name: c.name.trim().into(),
+            name: if name.is_empty() { c.default_name() } else { name.into() },
             group: c.group.trim().into(),
             kind: c.kind,
             host: c.host.trim().into(),
@@ -53,6 +61,7 @@ impl From<&ConnectionConfig> for StoredConnection {
             database: c.database.trim().into(),
             user: c.user.as_deref().map(str::trim).filter(|u| !u.is_empty()).map(Into::into),
             ssl_mode: c.ssl_mode,
+            show_all_databases: c.show_all_databases,
         }
     }
 }
@@ -70,6 +79,7 @@ impl From<StoredConnection> for ConnectionConfig {
             user: s.user,
             password: None,
             ssl_mode: s.ssl_mode,
+            show_all_databases: s.show_all_databases,
         }
     }
 }
@@ -250,6 +260,28 @@ mod tests {
     }
 
     #[test]
+    fn old_files_show_all_databases_and_the_flag_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("c.json");
+        fs::write(&path, r#"{"version":1,"connections":[{"id":"x","name":"x","kind":"postgres","host":"h","database":"d"}]}"#).unwrap();
+        let mut store = ConnectionStore::open(&path).unwrap();
+        assert!(store.connections()[0].show_all_databases);
+        let only_one = ConnectionConfig { show_all_databases: false, ..store.connections()[0].clone() };
+        store.upsert(only_one).unwrap();
+        assert!(!ConnectionStore::open(&path).unwrap().connections()[0].show_all_databases);
+    }
+
+    #[test]
+    fn empty_name_defaults_to_database_then_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = ConnectionStore::open(dir.path().join("c.json")).unwrap();
+        let with_db = store.upsert(ConnectionConfig { name: " ".into(), ..sample("x") }).unwrap();
+        assert_eq!(with_db.name, "app");
+        let no_db = ConnectionConfig { name: String::new(), database: String::new(), host: "db.internal".into(), ..sample("x") };
+        assert_eq!(store.upsert(no_db).unwrap().name, "db.internal");
+    }
+
+    #[test]
     fn upsert_replaces_in_place_and_remove_deletes() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = ConnectionStore::open(dir.path().join("c.json")).unwrap();
@@ -269,7 +301,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("c.json");
         let mut store = ConnectionStore::open(&path).unwrap();
-        assert!(matches!(store.upsert(sample("")), Err(Error::InvalidConfig(_))));
+        let no_host = ConnectionConfig { host: " ".into(), ..sample("x") };
+        assert!(matches!(store.upsert(no_host), Err(Error::InvalidConfig(_))));
         assert!(!path.exists());
     }
 

@@ -84,3 +84,28 @@ private let postgresEnabled = ProcessInfo.processInfo.environment["DBEAR_TEST_PO
     let all = try await driver.execute("select * from users")
     #expect(all.rows.count == 248 && !all.truncated)
 }
+
+@Test func listsDatabasesAndSwitchesDatabase() async throws {
+    #expect(appDev.showAllDatabases)
+    let databases = try await Drivers.make(for: appDev).listDatabases()
+    #expect(databases == ["app", "app_test", "postgres"])
+    let other = appDev.withDatabase("app_test")
+    #expect(other.id == appDev.id && other.summary.hasSuffix("/app_test"))
+}
+
+@Test(.enabled(if: postgresEnabled)) func realPostgresOtherDatabase() async throws {
+    let databases = try await Drivers.make(for: devDB).listDatabases()
+    #expect(databases.contains("app_dev") && databases.contains("postgres"))
+    let result = try await Drivers.make(for: devDB.withDatabase("postgres")).execute("select current_database()")
+    #expect(result.rows.first?.values.first == .text("postgres"))
+}
+
+@Test func emptyDatabaseAndNameFallBack() throws {
+    let noDatabase = try ConnectionConfig.parse(url: "postgres://u@db.example.com:5432")
+    #expect(noDatabase.validationError == nil)
+    #expect(noDatabase.name == "db.example.com" && noDatabase.defaultName == "db.example.com")
+    #expect(noDatabase.defaultDatabase == "postgres")
+    var named = noDatabase
+    named.database = "app"
+    #expect(named.defaultName == "app" && named.defaultDatabase == "app")
+}

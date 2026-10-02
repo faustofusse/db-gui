@@ -79,7 +79,7 @@ async fn connect(config: &ConnectionConfig) -> Result<Client> {
     let mut pg = tokio_postgres::Config::new();
     pg.host(&config.host)
         .port(config.port.unwrap_or(5432))
-        .dbname(&config.database)
+        .dbname(config.default_database())
         .user(config.user.as_deref().unwrap_or("postgres"))
         .application_name("dbear")
         .connect_timeout(CONNECT_TIMEOUT)
@@ -122,6 +122,30 @@ impl Driver for PostgresDriver {
 
     async fn is_connected(&self) -> bool {
         self.browse.is_open().await || self.query.is_open().await
+    }
+
+    async fn list_databases(&self) -> Result<Vec<String>> {
+        let client = self.browse_client().await?;
+        let rows = client
+            .query(
+                r"
+                select datname from pg_database
+                where datallowconn and not datistemplate
+                  and has_database_privilege(datname, 'CONNECT')
+                order by datname
+                ",
+                &[],
+            )
+            .await
+            .map_err(|e| query_error(&e, None))?;
+        let mut names: Vec<String> = rows.iter().map(|r| r.get(0)).collect();
+        // The default database is always listed, even if the catalog hides it from us.
+        let default = self.config.default_database().to_string();
+        if !names.contains(&default) {
+            names.push(default);
+            names.sort();
+        }
+        Ok(names)
     }
 
     async fn list_schemas(&self) -> Result<Vec<Schema>> {

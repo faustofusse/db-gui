@@ -37,6 +37,7 @@ pub struct ConnectionConfig {
     pub user: Option<String>,
     pub password: Option<String>,
     pub ssl_mode: SslMode,
+    pub show_all_databases: bool,
 }
 
 #[derive(uniffi::Enum, Clone, Copy)]
@@ -134,6 +135,10 @@ impl Connection {
 
     pub async fn is_connected(&self) -> bool {
         self.inner.is_connected().await
+    }
+
+    pub async fn list_databases(&self) -> Result<Vec<String>, DbError> {
+        Ok(self.inner.list_databases().await?)
     }
 
     pub async fn list_schemas(&self) -> Result<Vec<Schema>, DbError> {
@@ -235,6 +240,18 @@ pub fn sample_connections() -> Vec<ConnectionConfig> {
 }
 
 /// e.g. "PostgreSQL · localhost:5432/app_dev"
+/// The database opened when `database` is empty (Postgres: `postgres`).
+#[uniffi::export]
+pub fn default_database(config: ConnectionConfig) -> String {
+    dbcore::ConnectionConfig::from(config).default_database().to_string()
+}
+
+/// Name used when the user leaves it empty: the database, else the host.
+#[uniffi::export]
+pub fn default_connection_name(config: ConnectionConfig) -> String {
+    dbcore::ConnectionConfig::from(config).default_name()
+}
+
 #[uniffi::export]
 pub fn connection_summary(config: ConnectionConfig) -> String {
     dbcore::ConnectionConfig::from(config).summary()
@@ -349,6 +366,7 @@ impl From<ConnectionConfig> for dbcore::ConnectionConfig {
             user: c.user,
             password: c.password,
             ssl_mode: c.ssl_mode.into(),
+            show_all_databases: c.show_all_databases,
         }
     }
 }
@@ -366,6 +384,7 @@ impl From<dbcore::ConnectionConfig> for ConnectionConfig {
             user: c.user,
             password: c.password,
             ssl_mode: c.ssl_mode.into(),
+            show_all_databases: c.show_all_databases,
         }
     }
 }

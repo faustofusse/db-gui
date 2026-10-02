@@ -9,7 +9,7 @@ struct TablesList: View {
 
     var body: some View {
         content
-            .navigationTitle(model.selectedConnection?.name ?? "Tables")
+            .navigationTitle(model.selectedTarget.map { model.displayName(of: $0) } ?? "Tables")
             .navigationSubtitle(subtitle)
             .toolbar {
                 ToolbarItemGroup {
@@ -31,7 +31,7 @@ struct TablesList: View {
                     .menuIndicator(.hidden)
                 }
             }
-            .task(id: model.selectedConnectionID) {
+            .task(id: model.selectedTarget?.driverKey) {
                 collapsed = []
                 await model.loadSchemas()
             }
@@ -39,7 +39,7 @@ struct TablesList: View {
 
     private var subtitle: String {
         guard let schemas = model.schemas.value else {
-            return model.selectedConnection?.summary ?? ""
+            return model.selectedTarget?.summary ?? ""
         }
         if tablesOnly { return "Filter by: Tables only" }
         let tables = schemas.reduce(0) { $0 + $1.tables.count }

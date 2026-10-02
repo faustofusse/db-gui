@@ -30,6 +30,10 @@ final class RustDriver: DatabaseDriver {
         await connection.isConnected()
     }
 
+    func listDatabases() async throws -> [String] {
+        try await bridged { try await connection.listDatabases() }
+    }
+
     func listSchemas() async throws -> [Schema] {
         try await bridged { try await connection.listSchemas() }.map(Schema.init)
     }
@@ -125,7 +129,7 @@ extension ConnectionConfig {
         self.init(
             id: c.id, name: c.name, group: c.group, kind: DatabaseKind(c.kind),
             host: c.host, port: c.port.map(Int.init), database: c.database, user: c.user,
-            password: c.password, sslMode: SslMode(c.sslMode),
+            password: c.password, sslMode: SslMode(c.sslMode), showAllDatabases: c.showAllDatabases,
             summary: DBCoreFFI.connectionSummary(config: c)
         )
     }
@@ -136,7 +140,7 @@ extension DBCoreFFI.ConnectionConfig {
         self.init(
             id: c.id, name: c.name, group: c.group, kind: DBCoreFFI.DatabaseKind(c.kind),
             host: c.host, port: c.port.map { UInt16(clamping: $0) }, database: c.database, user: c.user,
-            password: c.password, sslMode: DBCoreFFI.SslMode(c.sslMode)
+            password: c.password, sslMode: DBCoreFFI.SslMode(c.sslMode), showAllDatabases: c.showAllDatabases
         )
     }
 }

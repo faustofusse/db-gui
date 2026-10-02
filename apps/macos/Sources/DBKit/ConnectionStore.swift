@@ -59,6 +59,24 @@ extension ConnectionConfig {
         DBCoreFFI.connectionUrl(config: DBCoreFFI.ConnectionConfig(self), includePassword: includingPassword)
     }
 
+    /// The database actually opened: `database`, or the server default when it's empty
+    /// (Postgres: `postgres`; empty for MySQL).
+    public var defaultDatabase: String {
+        DBCoreFFI.defaultDatabase(config: DBCoreFFI.ConnectionConfig(self))
+    }
+
+    /// Name used when `name` is left empty: the database, else the host.
+    public var defaultName: String {
+        DBCoreFFI.defaultConnectionName(config: DBCoreFFI.ConnectionConfig(self))
+    }
+
+    /// The same connection (same id and login) pointed at another database on the server.
+    public func withDatabase(_ database: String) -> ConnectionConfig {
+        var copy = self
+        copy.database = database
+        return copy.refreshed
+    }
+
     /// The same config with `summary` recomputed (after editing fields).
     public var refreshed: ConnectionConfig {
         ConnectionConfig(DBCoreFFI.ConnectionConfig(self))

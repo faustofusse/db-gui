@@ -138,9 +138,25 @@ struct ConnectionEditorRequest: Identifiable {
 
 extension ConnectionConfig {
     /// Anything besides name/group changed, so an open connection is stale.
+    /// Identifies a driver: one server connection per (connection, database).
+    /// Uses the effective database, so an empty `database` and the server default share a driver.
+    var driverKey: DriverKey { DriverKey(connectionID: id, database: defaultDatabase) }
+
     func connectsDifferently(than other: ConnectionConfig) -> Bool {
         (kind, host, port, database, user, sslMode) != (other.kind, other.host, other.port, other.database, other.user, other.sslMode)
     }
+}
+
+struct DriverKey: Hashable {
+    let connectionID: ConnectionConfig.ID
+    let database: String
+}
+
+/// A row in the connections sidebar: the connection itself, or one of its databases.
+struct SidebarItem: Hashable {
+    let connectionID: ConnectionConfig.ID
+    /// `nil` for the connection row.
+    let database: String?
 }
 
 @Observable
@@ -172,8 +188,20 @@ final class AppModel {
     }
     var selectedConnectionID: ConnectionConfig.ID? {
         // Show a spinner, not the previous connection's tables, until the new ones load.
-        didSet { if selectedConnectionID != oldValue { schemas = .loading } }
+        didSet {
+            guard selectedConnectionID != oldValue else { return }
+            selectedDatabase = nil
+            schemas = .loading
+        }
     }
+    /// Database shown for the selected connection; `nil` means the connection's own `database`.
+    var selectedDatabase: String? {
+        didSet { if selectedDatabase != oldValue { schemas = .loading } }
+    }
+    /// Databases on each connection's server, once listed (only for "show all databases" connections).
+    var databaseLists: [ConnectionConfig.ID: [String]] = [:]
+    /// Connections whose databases are expanded in the sidebar.
+    var expandedConnections: Set<ConnectionConfig.ID> = []
 
     var schemas: LoadState<[Schema]> = .idle
     /// Connections whose last attempt failed (shows a warning in the sidebar).
@@ -198,7 +226,7 @@ final class AppModel {
     static let defaultEditorFontSize = NSFont.systemFontSize
     static let editorFontSizes: ClosedRange<CGFloat> = 8...40
 
-    private var drivers: [ConnectionConfig.ID: any DatabaseDriver] = [:]
+    private var drivers: [DriverKey: any DatabaseDriver] = [:]
     private var scriptCounter = 0
 
     private static let editorFontSizeKey = "editorFontSize"
@@ -233,13 +261,55 @@ final class AppModel {
         connections.first { $0.id == selectedConnectionID }
     }
 
+    /// The selected connection pointed at the selected database: what the tables column shows.
+    var selectedTarget: ConnectionConfig? {
+        guard let connection = selectedConnection else { return nil }
+        guard let db = selectedDatabase, db != connection.defaultDatabase else { return connection }
+        return connection.withDatabase(db)
+    }
+
+    /// Selects a connection and one of its databases (`nil` = its default database).
+    func select(_ connectionID: ConnectionConfig.ID?, database: String? = nil) {
+        selectedConnectionID = connectionID
+        let connection = connections.first { $0.id == connectionID }
+        let isDefault = database == nil || database == connection?.database || database == connection?.defaultDatabase
+        selectedDatabase = isDefault ? nil : database
+    }
+
+    func select(_ item: SidebarItem) {
+        select(item.connectionID, database: item.database)
+    }
+
+    /// Databases to list under a connection in the sidebar (nil when there's nothing to choose).
+    func databases(of connection: ConnectionConfig) -> [String]? {
+        guard connection.showAllDatabases, connection.supportsMultipleDatabases,
+              let list = databaseLists[connection.id], list.count > 1 else { return nil }
+        return list
+    }
+
+    /// The highlighted sidebar row: a database row when the connection is expanded, else the connection.
+    var selectedSidebarItem: SidebarItem? {
+        guard let connection = selectedConnection else { return nil }
+        guard databases(of: connection) != nil, expandedConnections.contains(connection.id) else {
+            return SidebarItem(connectionID: connection.id, database: nil)
+        }
+        return SidebarItem(connectionID: connection.id, database: selectedDatabase ?? connection.defaultDatabase)
+    }
+
+    /// "name" for a connection's own database, "name · other_db" for the rest.
+    func displayName(of config: ConnectionConfig) -> String {
+        let saved = connections.first { $0.id == config.id }
+        guard let saved, saved.defaultDatabase != config.defaultDatabase else { return config.name }
+        return "\(config.name) · \(config.defaultDatabase)"
+    }
+
     var activeTab: WorkspaceTab? {
         tabs.first { $0.id == activeTabID }
     }
 
     /// Highlighted row in the tables column: the active tab's table, if it belongs to the shown connection.
     var selectedTableID: TableInfo.ID? {
-        guard case .table(let t) = activeTab, t.connection.id == selectedConnectionID else { return nil }
+        guard case .table(let t) = activeTab, t.connection.driverKey == selectedTarget?.driverKey else { return nil }
         return t.table.id
     }
 
@@ -267,13 +337,18 @@ final class AppModel {
 
     /// The driver for a connection, created on first use with the latest saved settings
     /// and the password from the Keychain (read only now, so browsing never prompts).
+    /// `config.database` picks which database on the server (each gets its own driver).
     private func driver(for config: ConnectionConfig) -> any DatabaseDriver {
-        if let d = drivers[config.id] { return d }
-        var current = connections.first { $0.id == config.id } ?? config
+        if let d = drivers[config.driverKey] { return d }
+        var current = connections.first { $0.id == config.id }.map { $0.withDatabase(config.database) } ?? config
         if current.password == nil { current.password = secrets.password(for: config.id) }
         let d = Drivers.make(for: current)
-        drivers[config.id] = d
+        drivers[config.driverKey] = d
         return d
+    }
+
+    private func drivers(of id: ConnectionConfig.ID) -> [any DatabaseDriver] {
+        drivers.filter { $0.key.connectionID == id }.map(\.value)
     }
 
     // MARK: Saved connections
@@ -306,6 +381,11 @@ final class AppModel {
         }
         if let previous, previous.connectsDifferently(than: saved) || password != nil {
             resetConnection(saved.id)
+        } else if let previous, previous.showAllDatabases != saved.showAllDatabases {
+            databaseLists[saved.id] = nil
+            if saved.id == selectedConnectionID {
+                if saved.showAllDatabases { Task { await loadDatabases(saved) } } else { select(saved.id) }
+            }
         }
         connections = store.connections()
         failedConnections.remove(saved.id)
@@ -316,7 +396,8 @@ final class AppModel {
     func duplicate(_ config: ConnectionConfig) {
         let fresh = ConnectionConfig(
             id: "", name: "\(config.name) copy", group: config.group, kind: config.kind, host: config.host,
-            port: config.port, database: config.database, user: config.user, sslMode: config.sslMode)
+            port: config.port, database: config.database, user: config.user, sslMode: config.sslMode,
+            showAllDatabases: config.showAllDatabases)
         do {
             let saved = try save(fresh, password: savedPassword(config.id))
             selectedConnectionID = saved.id
@@ -357,9 +438,10 @@ final class AppModel {
 
     /// Disconnects and forgets the driver (so the next use picks up new settings) and closes its tabs.
     private func resetConnection(_ id: ConnectionConfig.ID) {
-        if let driver = drivers.removeValue(forKey: id) {
-            Task { await driver.disconnect() }
+        for key in drivers.keys where key.connectionID == id {
+            if let driver = drivers.removeValue(forKey: key) { Task { await driver.disconnect() } }
         }
+        databaseLists[id] = nil
         openConnections.remove(id)
         tabs.filter { $0.connection.id == id }.forEach { close($0.id) }
         if id == selectedConnectionID { schemas = .loading; Task { await loadSchemas() } }
@@ -381,6 +463,7 @@ final class AppModel {
             try await driver(for: config).connect()
             failedConnections.remove(config.id)
             if config.id == selectedConnectionID, schemas.value == nil { await loadSchemas() }
+            await loadDatabases(config)
         } catch {
             failedConnections.insert(config.id)
         }
@@ -390,25 +473,32 @@ final class AppModel {
     /// Closes the server connection (stopping a running script) and puts the UI back the way it is
     /// at launch for that connection: its tabs close and, if selected, nothing is selected.
     func disconnect(_ config: ConnectionConfig) async {
-        guard let driver = drivers[config.id] else { return }
-        await driver.disconnect()
+        let open = drivers(of: config.id)
+        guard !open.isEmpty else { return }
+        for driver in open { await driver.disconnect() }
         tabs.filter { $0.connection.id == config.id }.forEach { close($0.id) }
+        databaseLists[config.id] = nil
+        expandedConnections.remove(config.id)
         if config.id == selectedConnectionID {
-            selectedConnectionID = nil
+            select(nil)
             schemas = .idle
         }
         await updateConnectionState(config.id)
     }
 
     func updateConnectionState(_ id: ConnectionConfig.ID) async {
-        let open = await drivers[id]?.isConnected() ?? false
+        var open = false
+        for driver in drivers(of: id) where await driver.isConnected() {
+            open = true
+            break
+        }
         if open { openConnections.insert(id) } else { openConnections.remove(id) }
     }
 
     /// Notices connections the server closed. Cheap: only asks drivers that exist, no network I/O.
     func monitorConnections() async {
         while !Task.isCancelled {
-            for id in drivers.keys { await updateConnectionState(id) }
+            for id in Set(drivers.keys.map(\.connectionID)) { await updateConnectionState(id) }
             try? await Task.sleep(for: .seconds(3))
         }
     }
@@ -416,19 +506,38 @@ final class AppModel {
     // MARK: Schemas
 
     func loadSchemas() async {
-        guard let config = selectedConnection else { schemas = .idle; return }
+        guard let connection = selectedConnection, let target = selectedTarget else { schemas = .idle; return }
         schemas = .loading
+        if databaseLists[connection.id] == nil {
+            Task { await loadDatabases(connection) }
+        }
+        // Only the connection's own database decides the sidebar's warning icon.
+        let isDefault = target.driverKey == connection.driverKey
         do {
-            let result = try await driver(for: config).listSchemas()
-            guard config.id == selectedConnectionID else { return }
-            failedConnections.remove(config.id)
+            let result = try await driver(for: target).listSchemas()
+            guard target.driverKey == selectedTarget?.driverKey else { return }
+            if isDefault { failedConnections.remove(connection.id) }
             schemas = .loaded(result)
         } catch {
-            guard config.id == selectedConnectionID else { return }
-            failedConnections.insert(config.id)
+            guard target.driverKey == selectedTarget?.driverKey else { return }
+            if isDefault { failedConnections.insert(connection.id) }
             schemas = .failed(error.localizedDescription)
         }
-        await updateConnectionState(config.id)
+        await updateConnectionState(connection.id)
+    }
+
+    /// Lists the server's databases for the sidebar. The first time there's more than one,
+    /// the connection expands so they're discoverable.
+    func loadDatabases(_ connection: ConnectionConfig) async {
+        guard connection.showAllDatabases, connection.supportsMultipleDatabases else { return }
+        do {
+            let list = try await driver(for: connection).listDatabases()
+            let firstTime = databaseLists[connection.id] == nil
+            databaseLists[connection.id] = list
+            if firstTime, list.count > 1 { expandedConnections.insert(connection.id) }
+        } catch {
+            // Not fatal: the connection still works with its own database.
+        }
     }
 
     // MARK: Tabs
@@ -436,18 +545,18 @@ final class AppModel {
     func activate(_ id: UUID) {
         guard let tab = tabs.first(where: { $0.id == id }) else { return }
         activeTabID = id
-        if tab.connection.id != selectedConnectionID {
-            selectedConnectionID = tab.connection.id
+        if tab.connection.driverKey != selectedTarget?.driverKey {
+            select(tab.connection.id, database: tab.connection.database)
         }
     }
 
     /// Opens a table from the selected connection. Reuses an existing tab for the same table,
     /// otherwise replaces the current preview tab (unless `pinned`).
     func openTable(_ table: TableInfo, pinned: Bool) {
-        guard let connection = selectedConnection else { return }
+        guard let connection = selectedTarget else { return }
 
         if let existing = tabs.first(where: {
-            if case .table(let t) = $0 { t.connection.id == connection.id && t.table.id == table.id } else { false }
+            if case .table(let t) = $0 { t.connection.driverKey == connection.driverKey && t.table.id == table.id } else { false }
         }) {
             if pinned, case .table(let t) = existing { t.isPreview = false }
             activeTabID = existing.id
@@ -485,7 +594,7 @@ final class AppModel {
     }
 
     func newScript() {
-        guard let connection = selectedConnection else { return }
+        guard let connection = selectedTarget else { return }
         scriptCounter += 1
         let tab = ScriptTab(connection: connection, title: "Script \(scriptCounter)", text: "")
         insertAfterActive(.script(tab))

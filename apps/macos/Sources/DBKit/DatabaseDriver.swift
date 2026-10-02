@@ -32,6 +32,8 @@ public protocol DatabaseDriver: Sendable {
     func disconnect() async
     /// Whether a server connection is open right now (false after the server drops it).
     func isConnected() async -> Bool
+    /// Databases on the same server this login can open (just the configured one for SQLite).
+    func listDatabases() async throws -> [String]
     func listSchemas() async throws -> [Schema]
     /// One page of a table. `totalCount` is only set for the first page (`offset == 0`).
     func fetchRows(of table: TableInfo, limit: Int, offset: Int) async throws -> QueryResult

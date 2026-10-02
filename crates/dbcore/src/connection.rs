@@ -97,6 +97,11 @@ impl Connection {
         on_runtime(async move { Ok(d.is_connected().await) }).await.unwrap_or(false)
     }
 
+    pub async fn list_databases(&self) -> Result<Vec<String>> {
+        let d = self.driver.clone();
+        on_runtime(async move { d.list_databases().await }).await
+    }
+
     pub async fn list_schemas(&self) -> Result<Vec<Schema>> {
         let d = self.driver.clone();
         on_runtime(async move { d.list_schemas().await }).await

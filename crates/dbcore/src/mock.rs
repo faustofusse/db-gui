@@ -39,6 +39,7 @@ pub fn connections() -> Vec<ConnectionConfig> {
             user: user.map(Into::into),
             password: None,
             ssl_mode: SslMode::default(),
+            show_all_databases: kind != DatabaseKind::Sqlite,
         }
     }
     use DatabaseKind::*;
@@ -264,6 +265,20 @@ impl Driver for MockDriver {
         self.connected.load(Ordering::Relaxed)
     }
 
+    async fn list_databases(&self) -> Result<Vec<String>> {
+        self.connect().await?;
+        let db = self.config.default_database().to_string();
+        let mut names = match self.config.kind {
+            DatabaseKind::Postgres => vec![format!("{db}_test"), db, "postgres".into()],
+            DatabaseKind::Mysql => vec![db, "shop".into()],
+            DatabaseKind::Sqlite => vec![db],
+        };
+        names.retain(|n| !n.is_empty());
+        names.sort();
+        names.dedup();
+        Ok(names)
+    }
+
     async fn list_schemas(&self) -> Result<Vec<Schema>> {
         self.connect().await?;
         Ok(specs(self.config.kind)
@@ -367,6 +382,16 @@ mod tests {
     // Plain #[test] + a throwaway executor proves Connection works outside tokio (as from Swift/GPUI).
     fn block_on<F: std::future::Future>(f: F) -> F::Output {
         tokio::runtime::Builder::new_current_thread().build().unwrap().block_on(f)
+    }
+
+    #[test]
+    fn lists_databases_and_switches_with_with_database() {
+        let config = connections().into_iter().find(|c| c.id == "staging-pg").unwrap();
+        let dbs = block_on(Connection::new(config.clone()).list_databases()).unwrap();
+        assert_eq!(dbs, ["app", "app_test", "postgres"]);
+        let other = config.with_database("app_test");
+        assert_eq!((other.id.as_str(), other.database.as_str()), ("staging-pg", "app_test"));
+        assert!(!block_on(Connection::new(other).list_schemas()).unwrap().is_empty());
     }
 
     #[test]

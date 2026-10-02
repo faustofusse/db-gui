@@ -36,6 +36,11 @@ pub trait Driver: Send + Sync + 'static {
     async fn disconnect(&self);
     /// Whether a server connection is currently open (and not dropped by the server).
     async fn is_connected(&self) -> bool;
+    /// Databases on the same server this login can connect to, sorted. Defaults to just the
+    /// configured one (e.g. SQLite files).
+    async fn list_databases(&self) -> Result<Vec<String>> {
+        Ok(vec![self.config().database.clone()])
+    }
     async fn list_schemas(&self) -> Result<Vec<Schema>>;
     /// One page of a table in a stable order. `total_count` is only computed for the first
     /// page (`offset == 0`), so loading further pages stays cheap.
