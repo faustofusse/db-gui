@@ -38,6 +38,9 @@ PLIST
 # Sign with a stable identity when there is one, so Keychain "Always Allow" survives rebuilds
 # (an ad-hoc signature changes every build and macOS asks again). Override with CODESIGN_IDENTITY.
 IDENTITY="${CODESIGN_IDENTITY:-$(security find-identity -p codesigning -v 2>/dev/null | sed -n 's/.*"\(Apple Development:[^"]*\)".*/\1/p' | head -1)}"
-codesign --force --sign "${IDENTITY:--}" "$APP" >/dev/null
+# DISTRIBUTE=1 adds the hardened runtime + secure timestamp that notarization requires.
+SIGN_OPTS=()
+[[ "${DISTRIBUTE:-0}" == 1 ]] && SIGN_OPTS=(--options runtime --timestamp)
+codesign --force ${SIGN_OPTS[@]+"${SIGN_OPTS[@]}"} --sign "${IDENTITY:--}" "$APP" >/dev/null
 echo "signed: ${IDENTITY:-ad-hoc}"
 echo "$APP"

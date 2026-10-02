@@ -16,9 +16,23 @@ if [[ "$PUBLISH" == --publish ]]; then
   git rev-parse -q --verify "refs/tags/$TAG" >/dev/null && { echo "tag $TAG already exists" >&2; exit 1; }
 fi
 
-VERSION="$VERSION" "$ROOT/scripts/bundle-mac.sh" release
+# Signed with Developer ID and notarized with the notarytool keychain profile NOTARY_PROFILE (default
+# "dbear"; create it once with `xcrun notarytool store-credentials dbear --apple-id ... --team-id ...`).
+NOTARY_PROFILE="${NOTARY_PROFILE:-dbear}"
+IDENTITY="${CODESIGN_IDENTITY:-$(security find-identity -p codesigning -v | sed -n 's/.*"\(Developer ID Application:[^"]*\)".*/\1/p' | head -1)}"
+[[ -n "$IDENTITY" ]] || { echo "no Developer ID Application certificate in the keychain" >&2; exit 1; }
+xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" >/dev/null || {
+  echo "no notarytool profile '$NOTARY_PROFILE'; run: xcrun notarytool store-credentials $NOTARY_PROFILE" >&2; exit 1; }
+
+VERSION="$VERSION" CODESIGN_IDENTITY="$IDENTITY" DISTRIBUTE=1 "$ROOT/scripts/bundle-mac.sh" release
 
 ZIP="build/dbear-$VERSION-macos-arm64.zip"
+rm -f "$ZIP"
+ditto -c -k --sequesterRsrc --keepParent build/dbear.app "$ZIP"
+xcrun notarytool submit "$ZIP" --keychain-profile "$NOTARY_PROFILE" --wait
+xcrun stapler staple build/dbear.app
+spctl --assess --type execute -vv build/dbear.app
+# Re-zip so the download carries the stapled ticket (works offline on first launch).
 rm -f "$ZIP"
 ditto -c -k --sequesterRsrc --keepParent build/dbear.app "$ZIP"
 shasum -a 256 "$ZIP" | tee "$ZIP.sha256"
@@ -30,9 +44,6 @@ git push origin "$TAG"
 gh release create "$TAG" "$ZIP" "$ZIP.sha256" --title "dbear $VERSION" --generate-notes --notes "$(cat <<'EOF'
 Apple silicon, macOS 15 or later.
 
-1. Download the zip, unzip it and move `dbear.app` to `/Applications`.
-2. The app is not notarized, so macOS blocks it the first time ("Apple could not verify..."). Click
-   Done, then open System Settings › Privacy & Security, scroll down and click "Open Anyway". Or run:
-   `xattr -dr com.apple.quarantine /Applications/dbear.app`
+Download the zip, unzip it and move `dbear.app` to `/Applications`.
 EOF
 )"
