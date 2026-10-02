@@ -249,12 +249,14 @@ impl Driver for MysqlDriver {
         Ok(tables)
     }
 
-    async fn fetch_rows(&self, table: &TableInfo, limit: u32, offset: u64) -> Result<QueryResult> {
+    async fn fetch_rows(&self, table: &TableInfo, query: &RowQuery, limit: u32, offset: u64) -> Result<QueryResult> {
         let mut lease = self.browse.lease(&self.config).await?;
         let meta = TableMeta::load(&mut lease, table).await?;
         let relation = MYSQL.quote_relation(&table.schema, &table.name);
-        let order_by: Vec<String> = meta.primary_key.iter().map(|c| MYSQL.quote_ident(c)).collect();
-        let sql = MYSQL.page_query(&relation, &order_by, limit, offset);
+        let tiebreak: Vec<String> = meta.primary_key.iter().map(|c| MYSQL.quote_ident(c)).collect();
+        let order_by = MYSQL.order_by(&query.sort, &meta.columns, &tiebreak)?;
+        let filter = query.filter.as_deref();
+        let sql = MYSQL.page_query(&relation, filter, &order_by, limit, offset);
 
         let result = run_script(lease.conn(), &sql, None).await;
         let mut result = lease.check(result).map_err(|e| query_error(&e))?;
@@ -263,13 +265,21 @@ impl Driver for MysqlDriver {
         result.total_count = match meta.estimated_rows {
             _ if offset > 0 => None,
             None => None,
+            Some(rows) if rows >= EXACT_COUNT_THRESHOLD && filter.is_some() => None,
             Some(rows) if rows >= EXACT_COUNT_THRESHOLD => Some(rows),
             Some(_) => {
-                let count = lease.conn().query_first::<u64, _>(format!("select count(*) from {relation}")).await;
+                let count = lease.conn().query_first::<u64, _>(MYSQL.count_query(&relation, filter)).await;
                 lease.check(count).map_err(|e| query_error(&e))?
             }
         };
         Ok(result)
+    }
+
+    async fn describe_table(&self, table: &TableInfo) -> Result<TableStructure> {
+        let mut lease = self.browse.lease(&self.config).await?;
+        // Fails with "table not found" before the catalog queries below quietly return nothing.
+        TableMeta::load(&mut lease, table).await?;
+        describe(&mut lease, table).await
     }
 
     async fn execute(&self, sql: &str, max_rows: Option<u32>) -> Result<QueryResult> {
@@ -374,6 +384,128 @@ impl TableMeta {
             estimated_rows: if table_type == "VIEW" { None } else { Some(table_rows.unwrap_or(0)) },
         })
     }
+}
+
+// MARK: Structure
+
+async fn describe(lease: &mut Lease<'_>, table: &TableInfo) -> Result<TableStructure> {
+    let schema = MYSQL.quote_literal(&table.schema);
+    let name = MYSQL.quote_literal(&table.name);
+    let relation = MYSQL.quote_relation(&table.schema, &table.name);
+
+    let primary_key = lease
+        .conn()
+        .query::<String, _>(format!(
+            "select column_name from information_schema.key_column_usage
+             where table_schema = {schema} and table_name = {name} and constraint_name = 'PRIMARY'
+             order by ordinal_position"
+        ))
+        .await;
+    let primary_key = lease.check(primary_key).map_err(|e| query_error(&e))?;
+
+    type ColumnRow = (String, String, String, Option<String>, String, String, Option<String>);
+    let columns = lease
+        .conn()
+        .query::<ColumnRow, _>(format!(
+            "select column_name, column_type, is_nullable, column_default, column_comment, extra, generation_expression
+             from information_schema.columns
+             where table_schema = {schema} and table_name = {name}
+             order by ordinal_position"
+        ))
+        .await;
+    let columns = lease
+        .check(columns)
+        .map_err(|e| query_error(&e))?
+        .into_iter()
+        .map(|(name, type_name, nullable, default, comment, extra, generated)| ColumnDetail {
+            is_primary_key: primary_key.contains(&name),
+            default_value: column_default(default, &extra, generated),
+            name,
+            type_name,
+            is_nullable: nullable == "YES",
+            comment: (!comment.is_empty()).then_some(comment),
+        })
+        .collect();
+
+    let index_rows = lease
+        .conn()
+        .query::<(String, i64, Option<String>), _>(format!(
+            "select index_name, non_unique, column_name
+             from information_schema.statistics
+             where table_schema = {schema} and table_name = {name}
+             order by index_name = 'PRIMARY' desc, index_name, seq_in_index"
+        ))
+        .await;
+    let mut indexes: Vec<IndexInfo> = Vec::new();
+    for (index, non_unique, column) in lease.check(index_rows).map_err(|e| query_error(&e))? {
+        if indexes.last().is_none_or(|i| i.name != index) {
+            indexes.push(IndexInfo {
+                is_primary: index == "PRIMARY",
+                name: index,
+                columns: Vec::new(),
+                is_unique: non_unique == 0,
+                definition: None,
+            });
+        }
+        // Functional indexes (MySQL 8.0.13+) have no column name.
+        indexes.last_mut().expect("pushed above").columns.push(column.unwrap_or_else(|| "<expression>".into()));
+    }
+
+    let fk_rows = lease
+        .conn()
+        .query::<(String, String, String, String, String, String, String), _>(format!(
+            "select k.constraint_name, k.column_name, k.referenced_table_schema, k.referenced_table_name,
+                    k.referenced_column_name, r.update_rule, r.delete_rule
+             from information_schema.key_column_usage k
+             join information_schema.referential_constraints r
+               on r.constraint_schema = k.constraint_schema and r.constraint_name = k.constraint_name
+              and r.table_name = k.table_name
+             where k.table_schema = {schema} and k.table_name = {name} and k.referenced_table_name is not null
+             order by k.constraint_name, k.ordinal_position"
+        ))
+        .await;
+    let mut foreign_keys: Vec<ForeignKeyInfo> = Vec::new();
+    for (constraint, column, ref_schema, ref_table, ref_column, on_update, on_delete) in
+        lease.check(fk_rows).map_err(|e| query_error(&e))?
+    {
+        if foreign_keys.last().is_none_or(|f| f.name != constraint) {
+            foreign_keys.push(ForeignKeyInfo {
+                name: constraint,
+                columns: Vec::new(),
+                referenced_schema: ref_schema,
+                referenced_table: ref_table,
+                referenced_columns: Vec::new(),
+                on_update,
+                on_delete,
+            });
+        }
+        let fk = foreign_keys.last_mut().expect("pushed above");
+        fk.columns.push(column);
+        fk.referenced_columns.push(ref_column);
+    }
+
+    // `SHOW CREATE TABLE` works for views too; the statement is the second column either way.
+    let ddl = lease.conn().query_first::<mysql_async::Row, _>(format!("show create table {relation}")).await;
+    let ddl = lease
+        .check(ddl)
+        .map_err(|e| query_error(&e))?
+        .and_then(|row| row.get_opt::<String, _>(1).and_then(|r| r.ok()))
+        .map(|sql| format!("{sql};"));
+
+    Ok(TableStructure { columns, primary_key, indexes, foreign_keys, ddl })
+}
+
+/// What the structure view shows as a column's default: the default and the `extra` flags
+/// (`auto_increment`, `on update CURRENT_TIMESTAMP`), or the generation expression.
+fn column_default(default: Option<String>, extra: &str, generated: Option<String>) -> Option<String> {
+    let lower = extra.to_ascii_lowercase();
+    if let Some(expr) = generated.filter(|e| !e.is_empty() && lower.contains("generated") && !lower.contains("default_generated")) {
+        let storage = if lower.contains("stored") { "STORED" } else { "VIRTUAL" };
+        return Some(format!("GENERATED ALWAYS AS ({expr}) {storage}"));
+    }
+    let extra = extra.replace("DEFAULT_GENERATED", "");
+    let parts: Vec<&str> = default.as_deref().into_iter().chain([extra.trim()]).filter(|p| !p.is_empty()).collect();
+    (!parts.is_empty()).then(|| parts.join(" "))
 }
 
 // MARK: Running SQL

@@ -1,7 +1,8 @@
 //! Per-database SQL spelling, shared by the drivers and by features that generate SQL
 //! (sorting, filters, editing…), so those are written once for every backend.
 
-use crate::model::DatabaseKind;
+use crate::driver::{Error, Result};
+use crate::model::{ColumnInfo, DatabaseKind, SortKey};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Dialect(pub DatabaseKind);
@@ -29,11 +30,114 @@ impl Dialect {
         }
     }
 
-    /// One page of rows: `select * from rel [order by …] limit n offset m` (same spelling everywhere).
-    pub fn page_query(self, relation: &str, order_by: &[String], limit: u32, offset: u64) -> String {
+    /// One page of rows: `select * from rel [where (…)] [order by …] limit n offset m` (same spelling everywhere).
+    /// `filter` must come from [`normalize_filter`].
+    pub fn page_query(self, relation: &str, filter: Option<&str>, order_by: &[String], limit: u32, offset: u64) -> String {
         let order = if order_by.is_empty() { String::new() } else { format!(" order by {}", order_by.join(", ")) };
-        format!("select * from {relation}{order} limit {limit} offset {offset}")
+        format!("select * from {relation}{}{order} limit {limit} offset {offset}", where_clause(filter))
     }
+
+    /// `select count(*) from rel [where (…)]`.
+    pub fn count_query(self, relation: &str, filter: Option<&str>) -> String {
+        format!("select count(*) from {relation}{}", where_clause(filter))
+    }
+
+    /// `ORDER BY` terms: the user's sort, then the `tiebreak` terms (already quoted, e.g. the
+    /// primary key) that aren't sorted on yet, so pages never overlap or skip rows.
+    /// Fails on columns the table doesn't have.
+    pub fn order_by(self, sort: &[SortKey], columns: &[ColumnInfo], tiebreak: &[String]) -> Result<Vec<String>> {
+        let mut terms = Vec::with_capacity(sort.len() + tiebreak.len());
+        let mut used = Vec::new();
+        for key in sort {
+            if !columns.iter().any(|c| c.name == key.column) {
+                return Err(Error::Query(format!("Can’t sort by “{}”: no such column", key.column)));
+            }
+            let ident = self.quote_ident(&key.column);
+            if used.contains(&ident) {
+                continue;
+            }
+            terms.push(if key.descending { format!("{ident} desc") } else { ident.clone() });
+            used.push(ident);
+        }
+        terms.extend(tiebreak.iter().filter(|t| !used.contains(t)).cloned());
+        Ok(terms)
+    }
+}
+
+/// The filter goes on its own lines so a trailing `-- comment` can't swallow the closing paren.
+fn where_clause(filter: Option<&str>) -> String {
+    filter.map_or(String::new(), |f| format!(" where (\n{f}\n)"))
+}
+
+/// Cleans up a user `WHERE` filter: trims it, drops a leading `where` and trailing `;`s, and
+/// returns `None` when nothing is left. Rejects a `;` between statements, so a filter can't
+/// smuggle in a second statement (quotes and comments are skipped when looking for one).
+pub fn normalize_filter(filter: Option<&str>) -> Result<Option<String>> {
+    let Some(filter) = filter else { return Ok(None) };
+    let mut f = filter.trim();
+    if f.len() >= 6 && f[..5].eq_ignore_ascii_case("where") && f[5..].starts_with(char::is_whitespace) {
+        f = f[5..].trim_start();
+    }
+    let f = f.trim_end_matches(|c: char| c == ';' || c.is_whitespace());
+    if f.is_empty() {
+        return Ok(None);
+    }
+    if has_statement_separator(f) {
+        return Err(Error::Query("A filter is a single condition, like `status = 'paid'`: remove the “;”.".into()));
+    }
+    Ok(Some(f.to_string()))
+}
+
+/// Whether `sql` has a `;` outside string literals, quoted identifiers and comments.
+///
+/// Lexes the union of the dialects' rules, MySQL's included (`#` comments, `\'` escapes): MySQL runs
+/// browse queries through its multi-statement text protocol, so this is its only guard. Postgres and
+/// SQLite additionally prepare exactly one statement, so reading their SQL loosely here is harmless.
+fn has_statement_separator(sql: &str) -> bool {
+    let mut chars = sql.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            ';' => return true,
+            '\'' | '"' | '`' => {
+                // Doubled quotes (`''`) just end and restart the literal, which this handles too.
+                while let Some(d) = chars.next() {
+                    if d == '\\' && c != '`' {
+                        chars.next();
+                    } else if d == c {
+                        break;
+                    }
+                }
+            }
+            '#' => {
+                for d in chars.by_ref() {
+                    if d == '\n' {
+                        break;
+                    }
+                }
+            }
+            // MySQL needs whitespace after `--` (`1--1` is arithmetic there); requiring it everywhere
+            // only makes Postgres/SQLite `--x;` comments look like separators, which is the safe side.
+            '-' if chars.peek() == Some(&'-') && chars.clone().nth(1).is_none_or(char::is_whitespace) => {
+                for d in chars.by_ref() {
+                    if d == '\n' {
+                        break;
+                    }
+                }
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                chars.next();
+                let mut prev = ' ';
+                for d in chars.by_ref() {
+                    if prev == '*' && d == '/' {
+                        break;
+                    }
+                    prev = d;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Binary values shown in the grid: `0x0a1b…`, cut after `MAX_BLOB_PREVIEW` bytes.
@@ -91,8 +195,43 @@ mod tests {
     #[test]
     fn builds_page_queries() {
         let d = Dialect(DatabaseKind::Sqlite);
-        assert_eq!(d.page_query("\"main\".\"t\"", &[], 10, 0), "select * from \"main\".\"t\" limit 10 offset 0");
-        assert_eq!(d.page_query("t", &["\"id\"".into()], 5, 20), "select * from t order by \"id\" limit 5 offset 20");
+        assert_eq!(d.page_query("\"main\".\"t\"", None, &[], 10, 0), "select * from \"main\".\"t\" limit 10 offset 0");
+        assert_eq!(d.page_query("t", None, &["\"id\"".into()], 5, 20), "select * from t order by \"id\" limit 5 offset 20");
+        assert_eq!(
+            d.page_query("t", Some("a = 1 -- note"), &[], 5, 0),
+            "select * from t where (\na = 1 -- note\n) limit 5 offset 0"
+        );
+        assert_eq!(d.count_query("t", Some("a = 1")), "select count(*) from t where (\na = 1\n)");
+    }
+
+    #[test]
+    fn orders_by_sort_then_tiebreak() {
+        let d = Dialect(DatabaseKind::Mysql);
+        let columns = [
+            ColumnInfo { name: "id".into(), type_name: String::new(), is_primary_key: true, is_nullable: false },
+            ColumnInfo { name: "total".into(), type_name: String::new(), is_primary_key: false, is_nullable: false },
+        ];
+        let sort = |c: &str, descending| SortKey { column: c.into(), descending };
+        let tiebreak = ["`id`".to_string()];
+        assert_eq!(d.order_by(&[], &columns, &tiebreak).unwrap(), ["`id`"]);
+        assert_eq!(d.order_by(&[sort("total", true)], &columns, &tiebreak).unwrap(), ["`total` desc", "`id`"]);
+        assert_eq!(d.order_by(&[sort("id", true)], &columns, &tiebreak).unwrap(), ["`id` desc"]);
+        assert!(d.order_by(&[sort("nope", false)], &columns, &tiebreak).is_err());
+    }
+
+    #[test]
+    fn normalizes_filters() {
+        assert_eq!(normalize_filter(None).unwrap(), None);
+        assert_eq!(normalize_filter(Some("  ; ")).unwrap(), None);
+        assert_eq!(normalize_filter(Some("WHERE id > 3;")).unwrap().as_deref(), Some("id > 3"));
+        assert_eq!(normalize_filter(Some("whereabouts = 1")).unwrap().as_deref(), Some("whereabouts = 1"));
+        assert_eq!(normalize_filter(Some("note = 'a;b' -- x;\n")).unwrap().as_deref(), Some("note = 'a;b' -- x"));
+        assert_eq!(normalize_filter(Some("\"we;ird\" /* ; */ = 1")).unwrap().as_deref(), Some("\"we;ird\" /* ; */ = 1"));
+        assert!(normalize_filter(Some("1 = 1; drop table users")).is_err());
+        // MySQL: a backslash-escaped quote doesn't end the string, `#` starts a comment.
+        assert!(normalize_filter(Some(r"a = '\'' ; drop table t; '")).is_err());
+        assert!(normalize_filter(Some("a = 1 # '\n; drop table t; -- '")).is_err());
+        assert!(normalize_filter(Some("a = 1--1; drop table t")).is_err());
     }
 
     #[test]

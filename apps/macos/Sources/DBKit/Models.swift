@@ -123,6 +123,118 @@ public struct TableColumns: Sendable {
     }
 }
 
+/// One `ORDER BY` term when browsing a table.
+public struct SortKey: Hashable, Sendable {
+    public var column: String
+    public var descending: Bool
+
+    public init(column: String, descending: Bool = false) {
+        self.column = column
+        self.descending = descending
+    }
+}
+
+/// Sort and `WHERE` filter for browsing a table. The default is the table's natural order, unfiltered.
+public struct RowQuery: Hashable, Sendable {
+    /// Applied in order; the core adds the primary key (or row id) so pages stay stable.
+    public var sort: [SortKey]
+    /// A raw SQL condition (`status = 'paid'`); blank means no filter. The core rejects a `;`.
+    public var filter: String?
+
+    public init(sort: [SortKey] = [], filter: String? = nil) {
+        self.sort = sort
+        self.filter = filter
+    }
+}
+
+public struct ColumnDetail: Identifiable, Hashable, Sendable {
+    public var name: String
+    public var typeName: String
+    public var isNullable: Bool
+    /// Default or generation expression, as the database spells it.
+    public var defaultValue: String?
+    public var isPrimaryKey: Bool
+    public var comment: String?
+    public var id: String { name }
+
+    public init(
+        name: String, typeName: String, isNullable: Bool, defaultValue: String? = nil,
+        isPrimaryKey: Bool = false, comment: String? = nil
+    ) {
+        self.name = name
+        self.typeName = typeName
+        self.isNullable = isNullable
+        self.defaultValue = defaultValue
+        self.isPrimaryKey = isPrimaryKey
+        self.comment = comment
+    }
+}
+
+public struct IndexInfo: Identifiable, Hashable, Sendable {
+    public var name: String
+    public var columns: [String]
+    public var isUnique: Bool
+    public var isPrimary: Bool
+    /// Full `CREATE INDEX` statement, when the database keeps one.
+    public var definition: String?
+    public var id: String { name }
+
+    public init(name: String, columns: [String], isUnique: Bool, isPrimary: Bool, definition: String? = nil) {
+        self.name = name
+        self.columns = columns
+        self.isUnique = isUnique
+        self.isPrimary = isPrimary
+        self.definition = definition
+    }
+}
+
+public struct ForeignKeyInfo: Identifiable, Hashable, Sendable {
+    /// Empty for SQLite, which doesn't name foreign keys.
+    public var name: String
+    public var columns: [String]
+    public var referencedSchema: String
+    public var referencedTable: String
+    /// Empty when SQLite references the parent's primary key implicitly.
+    public var referencedColumns: [String]
+    public var onUpdate: String
+    public var onDelete: String
+    public var id: String { "\(name)|\(columns.joined(separator: ","))|\(referencedSchema).\(referencedTable)" }
+
+    public init(
+        name: String, columns: [String], referencedSchema: String, referencedTable: String,
+        referencedColumns: [String], onUpdate: String, onDelete: String
+    ) {
+        self.name = name
+        self.columns = columns
+        self.referencedSchema = referencedSchema
+        self.referencedTable = referencedTable
+        self.referencedColumns = referencedColumns
+        self.onUpdate = onUpdate
+        self.onDelete = onDelete
+    }
+}
+
+/// Columns, keys, indexes, foreign keys and DDL of a table or view.
+public struct TableStructure: Hashable, Sendable {
+    public var columns: [ColumnDetail]
+    /// Primary key columns in key order (empty for views and keyless tables).
+    public var primaryKey: [String]
+    public var indexes: [IndexInfo]
+    public var foreignKeys: [ForeignKeyInfo]
+    public var ddl: String?
+
+    public init(
+        columns: [ColumnDetail], primaryKey: [String] = [], indexes: [IndexInfo] = [],
+        foreignKeys: [ForeignKeyInfo] = [], ddl: String? = nil
+    ) {
+        self.columns = columns
+        self.primaryKey = primaryKey
+        self.indexes = indexes
+        self.foreignKeys = foreignKeys
+        self.ddl = ddl
+    }
+}
+
 public enum DBValue: Hashable, Sendable {
     case null
     case bool(Bool)

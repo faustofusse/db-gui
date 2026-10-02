@@ -15,6 +15,10 @@ enum LoadState<Value> {
 
 // MARK: - Tabs
 
+enum TableTabMode: Hashable {
+    case data, structure
+}
+
 @Observable
 @MainActor
 final class TableTab: Identifiable {
@@ -31,9 +35,32 @@ final class TableTab: Identifiable {
     var reachedEnd = false
     /// Bumped on reload so pages from an older load are dropped.
     var generation = 0
+    /// Reloading (new sort or filter, refresh) while the previous rows stay on screen.
+    var isReloading = false
     var search = ""
 
-    var canLoadMore: Bool { data.value != nil && !reachedEnd && !isLoadingMore && loadMoreError == nil }
+    /// Rows (`data`) or the table's definition (`structure`).
+    var mode = TableTabMode.data
+    var structure: LoadState<TableStructure> = .idle
+
+    /// Server-side sort, cycled by clicking column headers.
+    var sort: [SortKey] = []
+    /// What's typed in the filter bar (applied with Return).
+    var filterText = ""
+    /// The filter the rows were loaded with.
+    var appliedFilter: String?
+    /// Bumped to focus the filter field (⌥⌘F).
+    var filterFocusRequest = 0
+
+    var query: RowQuery { RowQuery(sort: sort, filter: appliedFilter) }
+    var canLoadMore: Bool { data.value != nil && !reachedEnd && !isLoadingMore && loadMoreError == nil && !isReloading }
+    /// The typed filter differs from the one the rows were loaded with.
+    var isFilterEdited: Bool { Self.normalized(filterText) != appliedFilter }
+
+    static func normalized(_ filter: String) -> String? {
+        let trimmed = filter.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
 
     init(connection: ConnectionConfig, table: TableInfo, isPreview: Bool) {
         self.connection = connection
@@ -682,22 +709,27 @@ final class AppModel {
 
     func refreshActiveTab() async {
         switch activeTab {
+        case .table(let t) where t.mode == .structure: await loadStructure(t)
         case .table(let t): await load(t)
         case .script(let s): await run(s)
         case nil: break
         }
     }
 
-    /// (Re)loads the first page of a table tab.
+    /// (Re)loads the first page of a table tab with its sort and filter. Rows already shown
+    /// stay up while the new ones load, so re-sorting doesn't flash a spinner.
     func load(_ tab: TableTab) async {
         tab.generation += 1
         let generation = tab.generation
-        tab.data = .loading
+        if tab.data.value == nil { tab.data = .loading }
+        tab.isReloading = true
         tab.isLoadingMore = false
         tab.loadMoreError = nil
         tab.reachedEnd = false
+        defer { if generation == tab.generation { tab.isReloading = false } }
         do {
-            let page = try await driver(for: tab.connection).fetchRows(of: tab.table, limit: pageSize, offset: 0)
+            let page = try await driver(for: tab.connection).fetchRows(
+                of: tab.table, query: tab.query, limit: pageSize, offset: 0)
             guard generation == tab.generation else { return }
             tab.reachedEnd = page.rows.count < pageSize || page.totalCount.map { page.rows.count >= $0 } == true
             tab.data = .loaded(page)
@@ -716,7 +748,7 @@ final class AppModel {
         defer { if generation == tab.generation { tab.isLoadingMore = false } }
         do {
             let page = try await driver(for: tab.connection)
-                .fetchRows(of: tab.table, limit: pageSize, offset: loaded.rows.count)
+                .fetchRows(of: tab.table, query: tab.query, limit: pageSize, offset: loaded.rows.count)
             guard generation == tab.generation, var current = tab.data.value else { return }
             current.rows += page.rows
             tab.reachedEnd = page.rows.count < pageSize
@@ -725,6 +757,70 @@ final class AppModel {
             guard generation == tab.generation else { return }
             tab.loadMoreError = error.localizedDescription
         }
+    }
+
+    /// Header click: sort ascending, then descending, then back to the table's natural order.
+    func toggleSort(_ tab: TableTab, column: String) {
+        switch tab.sort.first {
+        case let key? where key.column == column && !key.descending:
+            tab.sort = [SortKey(column: column, descending: true)]
+        case let key? where key.column == column:
+            tab.sort = []
+        default:
+            tab.sort = [SortKey(column: column)]
+        }
+        tab.isPreview = false
+        Task { await load(tab) }
+    }
+
+    func clearSort(_ tab: TableTab) {
+        guard !tab.sort.isEmpty else { return }
+        tab.sort = []
+        Task { await load(tab) }
+    }
+
+    /// Reloads with what's typed in the filter bar (Return).
+    func applyFilter(_ tab: TableTab) {
+        tab.appliedFilter = TableTab.normalized(tab.filterText)
+        tab.isPreview = false
+        Task { await load(tab) }
+    }
+
+    func clearFilter(_ tab: TableTab) {
+        tab.filterText = ""
+        guard tab.appliedFilter != nil else { return }
+        tab.appliedFilter = nil
+        Task { await load(tab) }
+    }
+
+    func setMode(_ mode: TableTabMode, of tab: TableTab) {
+        tab.mode = mode
+        if mode == .structure, tab.structure.value == nil, !tab.structure.isLoading {
+            Task { await loadStructure(tab) }
+        }
+    }
+
+    func loadStructure(_ tab: TableTab) async {
+        tab.structure = .loading
+        do {
+            tab.structure = .loaded(try await driver(for: tab.connection).describeTable(tab.table))
+        } catch {
+            tab.structure = .failed(error.localizedDescription)
+        }
+        await updateConnectionState(tab.connection.id)
+    }
+
+    /// Opens the table a foreign key points to (same connection and database as `tab`).
+    func openReferencedTable(_ foreignKey: ForeignKeyInfo, from tab: TableTab) {
+        if tab.connection.driverKey != selectedTarget?.driverKey {
+            select(tab.connection.id, database: tab.connection.database)
+        }
+        let id = TableInfo(schema: foreignKey.referencedSchema, name: foreignKey.referencedTable).id
+        openTable(table(withID: id) ?? TableInfo(schema: foreignKey.referencedSchema, name: foreignKey.referencedTable), pinned: true)
+    }
+
+    var activeTableTab: TableTab? {
+        if case .table(let t) = activeTab { t } else { nil }
     }
 
     func retryLoadMore(_ tab: TableTab) {

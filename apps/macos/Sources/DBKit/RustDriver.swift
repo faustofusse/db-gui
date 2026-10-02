@@ -43,12 +43,17 @@ final class RustDriver: DatabaseDriver {
         try await bridged { try await connection.listColumns() }.map(TableColumns.init)
     }
 
-    func fetchRows(of table: TableInfo, limit: Int, offset: Int) async throws -> QueryResult {
+    func fetchRows(of table: TableInfo, query: RowQuery, limit: Int, offset: Int) async throws -> QueryResult {
         let page = try await bridged {
             try await connection.fetchRows(
-                table: DBCoreFFI.TableInfo(table), limit: UInt32(clamping: limit), offset: UInt64(max(0, offset)))
+                table: DBCoreFFI.TableInfo(table), query: DBCoreFFI.RowQuery(query),
+                limit: UInt32(clamping: limit), offset: UInt64(max(0, offset)))
         }
         return QueryResult(page, firstRowID: offset)
+    }
+
+    func describeTable(_ table: TableInfo) async throws -> TableStructure {
+        TableStructure(try await bridged { try await connection.describeTable(table: DBCoreFFI.TableInfo(table)) })
     }
 
     func execute(_ sql: String, maxRows: Int?) async throws -> QueryResult {
@@ -206,6 +211,34 @@ extension ColumnInfo {
 extension DBCoreFFI.ColumnInfo {
     init(_ c: ColumnInfo) {
         self.init(name: c.name, typeName: c.typeName, isPrimaryKey: c.isPrimaryKey, isNullable: c.isNullable)
+    }
+}
+
+extension DBCoreFFI.RowQuery {
+    init(_ q: RowQuery) {
+        self.init(sort: q.sort.map { DBCoreFFI.SortKey(column: $0.column, descending: $0.descending) }, filter: q.filter)
+    }
+}
+
+extension TableStructure {
+    init(_ s: DBCoreFFI.TableStructure) {
+        self.init(
+            columns: s.columns.map {
+                ColumnDetail(name: $0.name, typeName: $0.typeName, isNullable: $0.isNullable,
+                             defaultValue: $0.defaultValue, isPrimaryKey: $0.isPrimaryKey, comment: $0.comment)
+            },
+            primaryKey: s.primaryKey,
+            indexes: s.indexes.map {
+                IndexInfo(name: $0.name, columns: $0.columns, isUnique: $0.isUnique, isPrimary: $0.isPrimary,
+                          definition: $0.definition)
+            },
+            foreignKeys: s.foreignKeys.map {
+                ForeignKeyInfo(name: $0.name, columns: $0.columns, referencedSchema: $0.referencedSchema,
+                               referencedTable: $0.referencedTable, referencedColumns: $0.referencedColumns,
+                               onUpdate: $0.onUpdate, onDelete: $0.onDelete)
+            },
+            ddl: s.ddl
+        )
     }
 }
 

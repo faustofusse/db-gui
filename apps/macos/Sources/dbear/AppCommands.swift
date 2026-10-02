@@ -38,10 +38,26 @@ struct AppCommands: Commands {
         CommandGroup(after: .textEditing) {
             Button("Find") { model.searchFocusRequest += 1 }
                 .keyboardShortcut("f", modifiers: .command)
+            Button("Filter Rows") {
+                if let tab = model.activeTableTab {
+                    model.setMode(.data, of: tab)
+                    tab.filterFocusRequest += 1
+                }
+            }
+            .keyboardShortcut("f", modifiers: [.command, .option])
+            .disabled(model.activeTableTab == nil)
         }
 
         // View menu. Only the SQL editor zooms; the rest of the UI keeps the system size.
         CommandGroup(after: .toolbar) {
+            Button("Data") { if let tab = model.activeTableTab { model.setMode(.data, of: tab) } }
+                .keyboardShortcut("1", modifiers: [.command, .option])
+                .disabled(model.activeTableTab == nil)
+            Button("Structure") { if let tab = model.activeTableTab { model.setMode(.structure, of: tab) } }
+                .keyboardShortcut("2", modifiers: [.command, .option])
+                .disabled(model.activeTableTab == nil)
+            Divider()
+
             Button("Actual Size") { model.resetEditorZoom() }
                 .keyboardShortcut("0", modifiers: .command)
                 .disabled(!model.isScriptActive || model.editorFontSize == AppModel.defaultEditorFontSize)

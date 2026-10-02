@@ -37,8 +37,11 @@ public protocol DatabaseDriver: Sendable {
     func listSchemas() async throws -> [Schema]
     /// Columns of every table and view this connection can see, for SQL completion.
     func listColumns() async throws -> [TableColumns]
-    /// One page of a table. `totalCount` is only set for the first page (`offset == 0`).
-    func fetchRows(of table: TableInfo, limit: Int, offset: Int) async throws -> QueryResult
+    /// One page of a table, sorted and filtered by `query`. `totalCount` is only set for the
+    /// first page (`offset == 0`), and may be nil for a filtered big table.
+    func fetchRows(of table: TableInfo, query: RowQuery, limit: Int, offset: Int) async throws -> QueryResult
+    /// Columns, keys, indexes, foreign keys and DDL of a table or view.
+    func describeTable(_ table: TableInfo) async throws -> TableStructure
     /// Runs a script keeping at most `maxRows` rows (nil = all); see `QueryResult.truncated`.
     func execute(_ sql: String, maxRows: Int?) async throws -> QueryResult
     /// Stops the running `execute`, which then throws `DatabaseError.cancelled`.
@@ -46,6 +49,11 @@ public protocol DatabaseDriver: Sendable {
 }
 
 extension DatabaseDriver {
+    /// One page of a table in its natural order, unfiltered.
+    public func fetchRows(of table: TableInfo, limit: Int, offset: Int) async throws -> QueryResult {
+        try await fetchRows(of: table, query: RowQuery(), limit: limit, offset: offset)
+    }
+
     /// Runs a script and keeps every row.
     public func execute(_ sql: String) async throws -> QueryResult {
         try await execute(sql, maxRows: nil)

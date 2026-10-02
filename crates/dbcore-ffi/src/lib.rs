@@ -87,6 +87,58 @@ pub enum Value {
     Text(String),
 }
 
+#[derive(uniffi::Record, Clone)]
+pub struct SortKey {
+    pub column: String,
+    pub descending: bool,
+}
+
+/// Sort and `WHERE` filter for browsing a table (see `dbcore::RowQuery`).
+#[derive(uniffi::Record, Clone, Default)]
+pub struct RowQuery {
+    pub sort: Vec<SortKey>,
+    pub filter: Option<String>,
+}
+
+#[derive(uniffi::Record)]
+pub struct ColumnDetail {
+    pub name: String,
+    pub type_name: String,
+    pub is_nullable: bool,
+    pub default_value: Option<String>,
+    pub is_primary_key: bool,
+    pub comment: Option<String>,
+}
+
+#[derive(uniffi::Record)]
+pub struct IndexInfo {
+    pub name: String,
+    pub columns: Vec<String>,
+    pub is_unique: bool,
+    pub is_primary: bool,
+    pub definition: Option<String>,
+}
+
+#[derive(uniffi::Record)]
+pub struct ForeignKeyInfo {
+    pub name: String,
+    pub columns: Vec<String>,
+    pub referenced_schema: String,
+    pub referenced_table: String,
+    pub referenced_columns: Vec<String>,
+    pub on_update: String,
+    pub on_delete: String,
+}
+
+#[derive(uniffi::Record)]
+pub struct TableStructure {
+    pub columns: Vec<ColumnDetail>,
+    pub primary_key: Vec<String>,
+    pub indexes: Vec<IndexInfo>,
+    pub foreign_keys: Vec<ForeignKeyInfo>,
+    pub ddl: Option<String>,
+}
+
 #[derive(uniffi::Record)]
 pub struct QueryResult {
     pub columns: Vec<ColumnInfo>,
@@ -159,8 +211,14 @@ impl Connection {
         Ok(self.inner.list_columns().await?.into_iter().map(Into::into).collect())
     }
 
-    pub async fn fetch_rows(&self, table: TableInfo, limit: u32, offset: u64) -> Result<QueryResult, DbError> {
-        Ok(self.inner.fetch_rows(table.into(), limit, offset).await?.into())
+    /// One page of a table, sorted and filtered by `query`.
+    pub async fn fetch_rows(&self, table: TableInfo, query: RowQuery, limit: u32, offset: u64) -> Result<QueryResult, DbError> {
+        Ok(self.inner.fetch_rows_with(table.into(), query.into(), limit, offset).await?.into())
+    }
+
+    /// Columns, keys, indexes, foreign keys and DDL of a table or view.
+    pub async fn describe_table(&self, table: TableInfo) -> Result<TableStructure, DbError> {
+        Ok(self.inner.describe_table(table.into()).await?.into())
     }
 
     /// Runs a script, keeping at most `max_rows` rows (`None` = all).
@@ -610,6 +668,60 @@ impl From<dbcore::QueryResult> for QueryResult {
             total_count: r.total_count,
             rows_affected: r.rows_affected,
             truncated: r.truncated,
+        }
+    }
+}
+
+impl From<RowQuery> for dbcore::RowQuery {
+    fn from(q: RowQuery) -> Self {
+        Self {
+            sort: q.sort.into_iter().map(|k| dbcore::SortKey { column: k.column, descending: k.descending }).collect(),
+            filter: q.filter,
+        }
+    }
+}
+
+impl From<dbcore::TableStructure> for TableStructure {
+    fn from(s: dbcore::TableStructure) -> Self {
+        Self {
+            columns: s
+                .columns
+                .into_iter()
+                .map(|c| ColumnDetail {
+                    name: c.name,
+                    type_name: c.type_name,
+                    is_nullable: c.is_nullable,
+                    default_value: c.default_value,
+                    is_primary_key: c.is_primary_key,
+                    comment: c.comment,
+                })
+                .collect(),
+            primary_key: s.primary_key,
+            indexes: s
+                .indexes
+                .into_iter()
+                .map(|i| IndexInfo {
+                    name: i.name,
+                    columns: i.columns,
+                    is_unique: i.is_unique,
+                    is_primary: i.is_primary,
+                    definition: i.definition,
+                })
+                .collect(),
+            foreign_keys: s
+                .foreign_keys
+                .into_iter()
+                .map(|f| ForeignKeyInfo {
+                    name: f.name,
+                    columns: f.columns,
+                    referenced_schema: f.referenced_schema,
+                    referenced_table: f.referenced_table,
+                    referenced_columns: f.referenced_columns,
+                    on_update: f.on_update,
+                    on_delete: f.on_delete,
+                })
+                .collect(),
+            ddl: s.ddl,
         }
     }
 }

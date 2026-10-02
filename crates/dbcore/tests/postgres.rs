@@ -3,7 +3,7 @@
 
 use std::time::{Duration, Instant};
 
-use dbcore::{mock, Connection, ConnectionConfig, Error, SslMode, TableInfo, TableKind, Value};
+use dbcore::{mock, Connection, ConnectionConfig, Error, RowQuery, SortKey, SslMode, TableInfo, TableKind, Value};
 
 fn enabled() -> bool {
     let on = std::env::var("DBEAR_TEST_POSTGRES").is_ok_and(|v| v == "1");
@@ -326,4 +326,105 @@ fn bad_credentials_and_unreachable_hosts_fail_to_connect() {
     // The dev server has no TLS: prefer falls back to plain, require must fail.
     let require = ConnectionConfig { ssl_mode: SslMode::Require, ..dev_config() };
     assert!(matches!(block_on(Connection::new(require).connect()), Err(Error::ConnectionFailed(_))));
+}
+
+fn sorted(column: &str, descending: bool) -> RowQuery {
+    RowQuery { sort: vec![SortKey { column: column.into(), descending }], filter: None }
+}
+
+fn filtered(filter: &str) -> RowQuery {
+    RowQuery { filter: Some(filter.into()), ..Default::default() }
+}
+
+#[test]
+fn sorts_and_pages_by_any_column() {
+    if !enabled() {
+        return;
+    }
+    let users = TableInfo::new("public", "users");
+    let first = block_on(dev().fetch_rows_with(users.clone(), sorted("email", true), 100, 0)).unwrap();
+    let second = block_on(dev().fetch_rows_with(users.clone(), sorted("email", true), 100, 100)).unwrap();
+    let emails: Vec<String> = column(&first, "email").into_iter().chain(column(&second, "email")).map(|v| v.display()).collect();
+    assert_eq!(emails.len(), 200);
+    assert!(emails.windows(2).all(|w| w[0] >= w[1]), "not descending");
+    assert_eq!(first.total_count, Some(248));
+
+    // Ties (many users share a name) are broken by the primary key, so pages never overlap.
+    let mut ids: Vec<String> = Vec::new();
+    for offset in (0..248).step_by(50) {
+        let page = block_on(dev().fetch_rows_with(users.clone(), sorted("name", false), 50, offset)).unwrap();
+        ids.extend(column(&page, "id").into_iter().map(|v| v.display()));
+    }
+    ids.sort();
+    ids.dedup();
+    assert_eq!(ids.len(), 248);
+
+    let err = block_on(dev().fetch_rows_with(users, sorted("nope", false), 10, 0)).unwrap_err();
+    assert!(matches!(err, Error::Query(m) if m.contains("nope")));
+}
+
+#[test]
+fn filters_rows_and_counts_matches() {
+    if !enabled() {
+        return;
+    }
+    let users = TableInfo::new("public", "users");
+    let admins = block_on(dev().fetch_rows_with(users.clone(), filtered("where is_admin;"), 100, 0)).unwrap();
+    assert!(column(&admins, "is_admin").iter().all(|v| **v == Value::Bool(true)));
+    assert_eq!(admins.total_count, Some(admins.rows.len() as u64));
+    assert_eq!(admins.rows.len(), 14);
+
+    // Sort and filter together, with a trailing comment.
+    let mut query = sorted("id", true);
+    query.filter = Some("id <= 10 -- small ones".into());
+    let page = block_on(dev().fetch_rows_with(users.clone(), query, 3, 0)).unwrap();
+    assert_eq!(column(&page, "id"), [&Value::Int(10), &Value::Int(9), &Value::Int(8)]);
+    assert_eq!(page.total_count, Some(10));
+
+    // Errors read like the user's filter, without positions into the generated SQL.
+    let err = block_on(dev().fetch_rows_with(users.clone(), filtered("nope = 1"), 10, 0)).unwrap_err();
+    assert!(matches!(&err, Error::Query(m) if m.contains("nope") && !m.contains("line")), "{err:?}");
+    let err = block_on(dev().fetch_rows_with(users.clone(), filtered("true; delete from users"), 10, 0)).unwrap_err();
+    assert!(matches!(err, Error::Query(_)));
+    assert_eq!(block_on(dev().fetch_rows(users, 1, 0)).unwrap().total_count, Some(248));
+
+    // Views have no count; filtering still works.
+    let view = block_on(dev().fetch_rows_with(TableInfo::new("public", "active_users"), filtered("false"), 10, 0)).unwrap();
+    assert!(view.rows.is_empty());
+}
+
+#[test]
+fn describes_tables_views_and_partitions() {
+    if !enabled() {
+        return;
+    }
+    let users = block_on(dev().describe_table(TableInfo::new("public", "users"))).unwrap();
+    assert_eq!(users.primary_key, ["id"]);
+    let id = users.columns.iter().find(|c| c.name == "id").unwrap();
+    assert_eq!(id.default_value.as_deref(), Some("GENERATED ALWAYS AS IDENTITY"));
+    let admin = users.columns.iter().find(|c| c.name == "is_admin").unwrap();
+    assert_eq!((admin.default_value.as_deref(), admin.is_nullable), (Some("false"), false));
+    assert!(users.indexes.iter().any(|i| i.is_primary && i.columns == ["id"]));
+    assert!(users.indexes.iter().any(|i| i.is_unique && !i.is_primary && i.columns == ["email"]));
+    let ddl = users.ddl.unwrap();
+    assert!(ddl.starts_with("CREATE TABLE \"public\".\"users\" (\n    \"id\" bigint GENERATED ALWAYS AS IDENTITY NOT NULL,"), "{ddl}");
+    assert!(ddl.contains("UNIQUE (email)") && ddl.contains("PRIMARY KEY (id)"), "{ddl}");
+    // Indexes that back constraints aren't repeated as CREATE INDEX.
+    assert!(!ddl.contains("CREATE UNIQUE INDEX"), "{ddl}");
+
+    let orders = block_on(dev().describe_table(TableInfo::new("public", "orders"))).unwrap();
+    let fk = orders.foreign_keys.iter().find(|f| f.columns == ["user_id"]).expect("orders.user_id fk");
+    assert_eq!((fk.referenced_schema.as_str(), fk.referenced_table.as_str()), ("public", "users"));
+    assert_eq!((fk.referenced_columns.as_slice(), fk.on_delete.as_str()), (&["id".to_string()][..], "NO ACTION"));
+
+    let view = block_on(dev().describe_table(TableInfo::new("public", "active_users"))).unwrap();
+    assert!(view.ddl.unwrap().starts_with("CREATE VIEW \"public\".\"active_users\" AS\n"));
+    assert!(view.primary_key.is_empty() && view.indexes.is_empty());
+
+    let events = block_on(dev().describe_table(TableInfo::new("analytics", "events"))).unwrap();
+    assert_eq!(events.primary_key, ["id", "created_at"]);
+    assert!(events.ddl.unwrap().contains(") PARTITION BY RANGE (created_at);"));
+
+    let err = block_on(dev().describe_table(TableInfo::new("public", "nope"))).unwrap_err();
+    assert!(matches!(err, Error::TableNotFound(_)));
 }

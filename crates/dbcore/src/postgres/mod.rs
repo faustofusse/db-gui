@@ -231,12 +231,12 @@ impl Driver for PostgresDriver {
         Ok(tables)
     }
 
-    async fn fetch_rows(&self, table: &TableInfo, limit: u32, offset: u64) -> Result<QueryResult> {
+    async fn fetch_rows(&self, table: &TableInfo, query: &RowQuery, limit: u32, offset: u64) -> Result<QueryResult> {
         let client = self.browse_client().await?;
         let relation = quote_relation(&table.schema, &table.name);
         let meta = TableMeta::load(&client, &relation, table).await?;
 
-        let order_by: Vec<String> = if !meta.primary_key.is_empty() {
+        let tiebreak: Vec<String> = if !meta.primary_key.is_empty() {
             meta.primary_key.iter().map(|c| quote_ident(c)).collect()
         } else if meta.relkind == "r" {
             // No primary key: physical order is stable enough for paging an idle table.
@@ -244,20 +244,23 @@ impl Driver for PostgresDriver {
         } else {
             Vec::new()
         };
-        let sql = PG.page_query(&relation, &order_by, limit, offset);
+        let order_by = PG.order_by(&query.sort, &meta.columns, &tiebreak)?;
+        let filter = query.filter.as_deref();
+        let sql = PG.page_query(&relation, filter, &order_by, limit, offset);
 
-        let mut result = run_single(&client, &sql).await?;
+        // Positions would point into the generated query, not at what the user typed: leave them out.
+        let mut result = run_single(&client, &sql, false).await?;
         // Catalog names read better than wire type names ("timestamp with time zone" vs "timestamptz").
         result.columns = meta.columns;
 
+        let small = meta.reltuples < EXACT_COUNT_THRESHOLD;
         result.total_count = match meta.relkind.as_str() {
             _ if offset > 0 => None,
-            "r" | "p" | "m" if meta.reltuples >= EXACT_COUNT_THRESHOLD => {
-                Some(meta.reltuples as u64)
-            }
+            "r" | "p" | "m" if !small && filter.is_some() => None,
+            "r" | "p" | "m" if !small => Some(meta.reltuples as u64),
             "r" | "p" | "m" => {
                 let row = client
-                    .query_one(&format!("select count(*) from {relation}"), &[])
+                    .query_one(&PG.count_query(&relation, filter), &[])
                     .await
                     .map_err(|e| query_error(&e, None))?;
                 Some(row.get::<_, i64>(0) as u64)
@@ -265,6 +268,12 @@ impl Driver for PostgresDriver {
             _ => None,
         };
         Ok(result)
+    }
+
+    async fn describe_table(&self, table: &TableInfo) -> Result<TableStructure> {
+        let client = self.browse_client().await?;
+        let relation = quote_relation(&table.schema, &table.name);
+        describe(&client, &relation, table).await
     }
 
     async fn execute(&self, sql: &str, max_rows: Option<u32>) -> Result<QueryResult> {
@@ -285,11 +294,12 @@ impl Driver for PostgresDriver {
 
 // MARK: Running SQL
 
-/// Runs one statement; column types come from `prepare`.
-async fn run_single(client: &Client, sql: &str) -> Result<QueryResult> {
-    let statement = client.prepare(sql).await.map_err(|e| query_error(&e, Some(sql)))?;
+/// Runs one statement; column types come from `prepare`. `positions`: report error line/column.
+async fn run_single(client: &Client, sql: &str, positions: bool) -> Result<QueryResult> {
+    let located = positions.then_some(sql);
+    let statement = client.prepare(sql).await.map_err(|e| query_error(&e, located))?;
     let types: Vec<Type> = statement.columns().iter().map(|c| c.type_().clone()).collect();
-    collect(client, sql, Some(&types), None).await
+    collect(client, sql, Some(&types), None, positions).await
 }
 
 /// Runs a script of one or more statements and returns the last result set, or, if no
@@ -298,10 +308,10 @@ async fn run_script(client: &Client, sql: &str, max_rows: Option<u32>) -> Result
     match client.prepare(sql).await {
         Ok(statement) => {
             let types: Vec<Type> = statement.columns().iter().map(|c| c.type_().clone()).collect();
-            collect(client, sql, Some(&types), max_rows).await
+            collect(client, sql, Some(&types), max_rows, true).await
         }
         // Several statements can't be prepared; run them as-is with values left as text.
-        Err(e) if is_multi_statement_error(&e) => collect(client, sql, None, max_rows).await,
+        Err(e) if is_multi_statement_error(&e) => collect(client, sql, None, max_rows, true).await,
         Err(e) => Err(query_error(&e, Some(sql))),
     }
 }
@@ -314,16 +324,23 @@ fn is_multi_statement_error(e: &tokio_postgres::Error) -> bool {
 
 /// Reads every message of a simple query. Rows past `max_rows` are counted but not decoded or kept:
 /// the stream is drained rather than cancelled, so later statements of a script still run.
-async fn collect(client: &Client, sql: &str, types: Option<&[Type]>, max_rows: Option<u32>) -> Result<QueryResult> {
+async fn collect(
+    client: &Client,
+    sql: &str,
+    types: Option<&[Type]>,
+    max_rows: Option<u32>,
+    positions: bool,
+) -> Result<QueryResult> {
     let max_rows = max_rows.map_or(usize::MAX, |m| m as usize);
-    let stream = client.simple_query_raw(sql).await.map_err(|e| query_error(&e, Some(sql)))?;
+    let located = positions.then_some(sql);
+    let stream = client.simple_query_raw(sql).await.map_err(|e| query_error(&e, located))?;
     pin_mut!(stream);
 
     let mut current: Option<QueryResult> = None;
     let mut last_rows: Option<QueryResult> = None;
     let mut last_affected: Option<u64> = None;
 
-    while let Some(message) = stream.try_next().await.map_err(|e| query_error(&e, Some(sql)))? {
+    while let Some(message) = stream.try_next().await.map_err(|e| query_error(&e, located))? {
         match message {
             SimpleQueryMessage::RowDescription(columns) => {
                 current = Some(QueryResult {
@@ -438,6 +455,229 @@ impl TableMeta {
             primary_key: columns.iter().filter(|c| c.is_primary_key).map(|c| c.name.clone()).collect(),
             columns,
         })
+    }
+}
+
+// MARK: Structure
+
+async fn describe(client: &Client, relation: &str, table: &TableInfo) -> Result<TableStructure> {
+    let not_found = |e: tokio_postgres::Error| match e.code() {
+        Some(&SqlState::UNDEFINED_TABLE) | Some(&SqlState::INVALID_SCHEMA_NAME) => Error::TableNotFound(table.qualified_name()),
+        _ => query_error(&e, None),
+    };
+    let info = client
+        .query_one(
+            "select c.relkind::text, obj_description(c.oid, 'pg_class'),
+                    case when c.relkind = 'p' then pg_get_partkeydef(c.oid) end,
+                    case when c.relkind in ('v', 'm') then pg_get_viewdef(c.oid, true) end
+             from pg_class c where c.oid = $1::text::regclass",
+            &[&relation],
+        )
+        .await
+        .map_err(not_found)?;
+    let relkind: String = info.get(0);
+    let table_comment: Option<String> = info.get(1);
+    let partition_key: Option<String> = info.get(2);
+    let view_definition: Option<String> = info.get(3);
+
+    let primary_key: Vec<String> = client
+        .query(
+            "select a.attname
+             from pg_index i
+             cross join lateral unnest(i.indkey) with ordinality k(attnum, ord)
+             join pg_attribute a on a.attrelid = i.indrelid and a.attnum = k.attnum
+             where i.indrelid = $1::text::regclass and i.indisprimary
+             order by k.ord",
+            &[&relation],
+        )
+        .await
+        .map_err(not_found)?
+        .iter()
+        .map(|r| r.get(0))
+        .collect();
+
+    let column_rows = client
+        .query(
+            "select a.attname, format_type(a.atttypid, a.atttypmod), a.attnotnull,
+                    pg_get_expr(d.adbin, d.adrelid), col_description(a.attrelid, a.attnum),
+                    a.attidentity::text, a.attgenerated::text
+             from pg_attribute a
+             left join pg_attrdef d on d.adrelid = a.attrelid and d.adnum = a.attnum
+             where a.attrelid = $1::text::regclass and a.attnum > 0 and not a.attisdropped
+             order by a.attnum",
+            &[&relation],
+        )
+        .await
+        .map_err(not_found)?;
+    let columns: Vec<ColumnDetail> = column_rows
+        .iter()
+        .map(|r| {
+            let name: String = r.get(0);
+            let expression: Option<String> = r.get(3);
+            let identity: String = r.get(5);
+            let generated: String = r.get(6);
+            let default_value = match (identity.as_str(), generated.as_str()) {
+                ("a", _) => Some("GENERATED ALWAYS AS IDENTITY".to_string()),
+                ("d", _) => Some("GENERATED BY DEFAULT AS IDENTITY".to_string()),
+                (_, "s") => expression.map(|e| format!("GENERATED ALWAYS AS ({e}) STORED")),
+                (_, "v") => expression.map(|e| format!("GENERATED ALWAYS AS ({e}) VIRTUAL")),
+                _ => expression,
+            };
+            ColumnDetail {
+                is_primary_key: primary_key.contains(&name),
+                name,
+                type_name: r.get(1),
+                is_nullable: !r.get::<_, bool>(2),
+                default_value,
+                comment: r.get(4),
+            }
+        })
+        .collect();
+
+    let indexes: Vec<(IndexInfo, bool)> = client
+        .query(
+            "select ic.relname, i.indisunique, i.indisprimary, pg_get_indexdef(i.indexrelid),
+                    array(select pg_get_indexdef(i.indexrelid, k, true) from generate_series(1, i.indnkeyatts) k),
+                    exists(select 1 from pg_constraint c where c.conindid = i.indexrelid and c.conrelid = i.indrelid)
+             from pg_index i
+             join pg_class ic on ic.oid = i.indexrelid
+             where i.indrelid = $1::text::regclass
+             order by i.indisprimary desc, ic.relname",
+            &[&relation],
+        )
+        .await
+        .map_err(not_found)?
+        .iter()
+        .map(|r| {
+            let index = IndexInfo {
+                name: r.get(0),
+                is_unique: r.get(1),
+                is_primary: r.get(2),
+                definition: Some(r.get(3)),
+                columns: r.get(4),
+            };
+            (index, r.get(5))
+        })
+        .collect();
+
+    let foreign_keys: Vec<ForeignKeyInfo> = client
+        .query(
+            "select con.conname,
+                    array(select a.attname from unnest(con.conkey) with ordinality k(n, o)
+                          join pg_attribute a on a.attrelid = con.conrelid and a.attnum = k.n order by k.o),
+                    fn.nspname, fc.relname,
+                    array(select a.attname from unnest(con.confkey) with ordinality k(n, o)
+                          join pg_attribute a on a.attrelid = con.confrelid and a.attnum = k.n order by k.o),
+                    con.confupdtype::text, con.confdeltype::text
+             from pg_constraint con
+             join pg_class fc on fc.oid = con.confrelid
+             join pg_namespace fn on fn.oid = fc.relnamespace
+             where con.conrelid = $1::text::regclass and con.contype = 'f'
+             order by con.conname",
+            &[&relation],
+        )
+        .await
+        .map_err(not_found)?
+        .iter()
+        .map(|r| ForeignKeyInfo {
+            name: r.get(0),
+            columns: r.get(1),
+            referenced_schema: r.get(2),
+            referenced_table: r.get(3),
+            referenced_columns: r.get(4),
+            on_update: fk_action(&r.get::<_, String>(5)).into(),
+            on_delete: fk_action(&r.get::<_, String>(6)).into(),
+        })
+        .collect();
+
+    let constraints: Vec<(String, String)> = client
+        .query(
+            "select conname, pg_get_constraintdef(oid, true)
+             from pg_constraint
+             where conrelid = $1::text::regclass and contype in ('p', 'u', 'f', 'c', 'x')
+             order by case contype when 'p' then 0 when 'u' then 1 when 'f' then 2 else 3 end, conname",
+            &[&relation],
+        )
+        .await
+        .map_err(not_found)?
+        .iter()
+        .map(|r| (r.get(0), r.get(1)))
+        .collect();
+
+    // MARK: DDL
+    let mut ddl = String::new();
+    match (relkind.as_str(), view_definition) {
+        ("v" | "m", Some(definition)) => {
+            let kind = if relkind == "m" { "MATERIALIZED VIEW" } else { "VIEW" };
+            let body = definition.trim().trim_end_matches(';');
+            ddl.push_str(&format!("CREATE {kind} {relation} AS\n{body};\n"));
+        }
+        _ => {
+            let mut lines: Vec<String> = column_rows
+                .iter()
+                .zip(&columns)
+                .map(|(r, c)| {
+                    let mut line = format!("    {} {}", quote_ident(&c.name), c.type_name);
+                    let plain_default = r.get::<_, String>(5).is_empty() && r.get::<_, String>(6).is_empty();
+                    match &c.default_value {
+                        Some(d) if plain_default => line.push_str(&format!(" DEFAULT {d}")),
+                        Some(d) => line.push_str(&format!(" {d}")),
+                        None => {}
+                    }
+                    if !c.is_nullable {
+                        line.push_str(" NOT NULL");
+                    }
+                    line
+                })
+                .collect();
+            lines.extend(constraints.iter().map(|(name, def)| format!("    CONSTRAINT {} {def}", quote_ident(name))));
+            let foreign = if relkind == "f" { "FOREIGN " } else { "" };
+            ddl.push_str(&format!("CREATE {foreign}TABLE {relation} (\n{}\n)", lines.join(",\n")));
+            if let Some(key) = partition_key {
+                ddl.push_str(&format!(" PARTITION BY {key}"));
+            }
+            ddl.push_str(";\n");
+        }
+    }
+    for (index, backs_constraint) in &indexes {
+        if let (false, Some(definition)) = (backs_constraint, &index.definition) {
+            ddl.push_str(&format!("\n{definition};"));
+        }
+    }
+    if indexes.iter().any(|(_, backs)| !backs) {
+        ddl.push('\n');
+    }
+    if let Some(comment) = table_comment {
+        let kind = match relkind.as_str() {
+            "v" => "VIEW",
+            "m" => "MATERIALIZED VIEW",
+            _ => "TABLE",
+        };
+        ddl.push_str(&format!("\nCOMMENT ON {kind} {relation} IS {};", PG.quote_literal(&comment)));
+    }
+    for c in &columns {
+        if let Some(comment) = &c.comment {
+            ddl.push_str(&format!("\nCOMMENT ON COLUMN {relation}.{} IS {};", quote_ident(&c.name), PG.quote_literal(comment)));
+        }
+    }
+
+    Ok(TableStructure {
+        columns,
+        primary_key,
+        indexes: indexes.into_iter().map(|(i, _)| i).collect(),
+        foreign_keys,
+        ddl: Some(ddl.trim_end().to_string()),
+    })
+}
+
+/// `pg_constraint.confupdtype` / `confdeltype` codes.
+fn fk_action(code: &str) -> &'static str {
+    match code {
+        "r" => "RESTRICT",
+        "c" => "CASCADE",
+        "n" => "SET NULL",
+        "d" => "SET DEFAULT",
+        _ => "NO ACTION",
     }
 }
 

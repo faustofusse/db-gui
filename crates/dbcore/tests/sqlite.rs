@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-use dbcore::{Connection, ConnectionConfig, DatabaseKind, Error, TableInfo, TableKind, Value};
+use dbcore::{Connection, ConnectionConfig, DatabaseKind, Error, RowQuery, SortKey, TableInfo, TableKind, Value};
 
 struct TempDb {
     _dir: tempfile::TempDir,
@@ -170,4 +170,42 @@ fn tracks_connection_state() {
     assert!(block_on(conn.is_connected()));
     block_on(conn.disconnect());
     assert!(!block_on(conn.is_connected()));
+}
+
+#[test]
+fn sorts_and_filters() {
+    let db = seeded();
+    let conn = open(&db);
+    let notes = TableInfo::new("main", "notes");
+    let query = RowQuery { sort: vec![SortKey { column: "title".into(), descending: false }], filter: Some("pinned".into()) };
+    let page = block_on(conn.fetch_rows_with(notes.clone(), query, 1000, 0)).unwrap();
+    let titles: Vec<String> = column(&page, "title").iter().map(|v| v.display()).collect();
+    assert!(!titles.is_empty() && titles.windows(2).all(|w| w[0] <= w[1]));
+    assert_eq!(page.total_count, Some(titles.len() as u64));
+
+    let bad = RowQuery { filter: Some("nope = 1".into()), ..Default::default() };
+    let err = block_on(conn.fetch_rows_with(notes.clone(), bad, 10, 0)).unwrap_err();
+    assert!(matches!(&err, Error::Query(m) if m.contains("nope") && !m.contains("line")), "{err:?}");
+    let evil = RowQuery { filter: Some("1; delete from notes".into()), ..Default::default() };
+    assert!(block_on(conn.fetch_rows_with(notes.clone(), evil, 10, 0)).is_err());
+    assert_eq!(block_on(conn.fetch_rows(notes, 1, 0)).unwrap().total_count, Some(120));
+}
+
+#[test]
+fn describes_tables() {
+    let db = seeded();
+    let conn = open(&db);
+    let links = block_on(conn.describe_table(TableInfo::new("main", "note_tags"))).unwrap();
+    assert_eq!(links.primary_key, ["note_id", "tag_id"]);
+    assert_eq!(links.foreign_keys.len(), 2);
+    let to_notes = links.foreign_keys.iter().find(|f| f.referenced_table == "notes").unwrap();
+    assert_eq!((to_notes.columns.as_slice(), to_notes.on_delete.as_str()), (&["note_id".to_string()][..], "CASCADE"));
+    assert!(links.ddl.unwrap().to_lowercase().contains("without rowid"));
+
+    let tags = block_on(conn.describe_table(TableInfo::new("main", "tags"))).unwrap();
+    assert!(tags.indexes.iter().any(|i| i.is_unique && i.columns == ["name"]));
+    let notes = block_on(conn.describe_table(TableInfo::new("main", "notes"))).unwrap();
+    let pinned = notes.columns.iter().find(|c| c.name == "pinned").unwrap();
+    assert_eq!(pinned.default_value.as_deref(), Some("0"));
+    assert!(matches!(block_on(conn.describe_table(TableInfo::new("main", "nope"))), Err(Error::TableNotFound(_))));
 }

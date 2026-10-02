@@ -222,36 +222,3 @@ private struct NewTabButton: View {
         }
     }
 }
-
-// MARK: - Table tab
-
-private struct TableTabView: View {
-    @Environment(AppModel.self) private var model
-    let tab: TableTab
-
-    var body: some View {
-        switch tab.data {
-        case .idle, .loading:
-            ProgressView().controlSize(.small)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-        case .failed(let message):
-            ContentUnavailableView {
-                Label("Couldn’t Load Rows", systemImage: "exclamationmark.triangle")
-            } description: {
-                Text(message).textSelection(.enabled)
-            } actions: {
-                Button("Try Again") { Task { await model.load(tab) } }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        case .loaded(let result):
-            DataGrid(
-                result: result, search: tab.search, version: tab.generation,
-                paging: GridPaging(
-                    hasMore: !tab.reachedEnd, isLoading: tab.isLoadingMore, error: tab.loadMoreError,
-                    loadMore: { Task { await model.loadMore(tab) } },
-                    retry: { model.retryLoadMore(tab) }
-                )
-            )
-        }
-    }
-}

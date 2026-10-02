@@ -7,7 +7,8 @@ use tokio::runtime::Runtime;
 use tokio::task::JoinHandle;
 
 use crate::driver::{Driver, Error, Result};
-use crate::model::{ConnectionConfig, QueryResult, Schema, TableColumns, TableInfo};
+use crate::dialect::normalize_filter;
+use crate::model::{ConnectionConfig, QueryResult, RowQuery, Schema, TableColumns, TableInfo, TableStructure};
 use crate::mock::{self, MockDriver};
 use crate::model::DatabaseKind;
 use crate::mysql::MysqlDriver;
@@ -114,9 +115,21 @@ impl Connection {
         on_runtime(async move { d.list_columns().await }).await
     }
 
+    /// One page of a table in its natural order (primary key), unfiltered.
     pub async fn fetch_rows(&self, table: TableInfo, limit: u32, offset: u64) -> Result<QueryResult> {
+        self.fetch_rows_with(table, RowQuery::default(), limit, offset).await
+    }
+
+    /// One page of a table, sorted and filtered by `query` (see [`RowQuery`]).
+    pub async fn fetch_rows_with(&self, table: TableInfo, mut query: RowQuery, limit: u32, offset: u64) -> Result<QueryResult> {
+        query.filter = normalize_filter(query.filter.as_deref())?;
         let d = self.driver.clone();
-        on_runtime(async move { d.fetch_rows(&table, limit, offset).await }).await
+        on_runtime(async move { d.fetch_rows(&table, &query, limit, offset).await }).await
+    }
+
+    pub async fn describe_table(&self, table: TableInfo) -> Result<TableStructure> {
+        let d = self.driver.clone();
+        on_runtime(async move { d.describe_table(&table).await }).await
     }
 
     /// Runs a script and keeps every row. Dropping the returned future also cancels the query on the server.

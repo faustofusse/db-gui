@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use crate::model::{ConnectionConfig, QueryResult, Schema, TableColumns, TableInfo};
+use crate::model::{ConnectionConfig, QueryResult, RowQuery, Schema, TableColumns, TableInfo, TableStructure};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Error {
@@ -45,9 +45,13 @@ pub trait Driver: Send + Sync + 'static {
     /// Columns of every table and view this connection can see, for SQL completion.
     /// Grouped by table, never one column at a time.
     async fn list_columns(&self) -> Result<Vec<TableColumns>>;
-    /// One page of a table in a stable order. `total_count` is only computed for the first
-    /// page (`offset == 0`), so loading further pages stays cheap.
-    async fn fetch_rows(&self, table: &TableInfo, limit: u32, offset: u64) -> Result<QueryResult>;
+    /// One page of a table in a stable order: `query.sort`, then the primary key (or row id).
+    /// `query.filter` is a `WHERE` expression, already checked by `dialect::normalize_filter`.
+    /// `total_count` is only computed for the first page (`offset == 0`), so loading further
+    /// pages stays cheap; with a filter it may be `None` on big tables (counting would scan them).
+    async fn fetch_rows(&self, table: &TableInfo, query: &RowQuery, limit: u32, offset: u64) -> Result<QueryResult>;
+    /// Columns, keys, indexes, foreign keys and DDL of a table or view.
+    async fn describe_table(&self, table: &TableInfo) -> Result<TableStructure>;
     /// Runs a script. At most `max_rows` rows are kept; the rest are counted and dropped
     /// (`truncated` + `total_count`), so huge results can't exhaust memory.
     async fn execute(&self, sql: &str, max_rows: Option<u32>) -> Result<QueryResult>;

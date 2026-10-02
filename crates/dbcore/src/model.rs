@@ -177,6 +177,74 @@ pub struct TableColumns {
     pub columns: Vec<ColumnInfo>,
 }
 
+/// One `ORDER BY` term for table browsing.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SortKey {
+    pub column: String,
+    pub descending: bool,
+}
+
+/// How to browse a table: user sort and a `WHERE` filter. The default is the table's natural
+/// order (primary key, else physical order) with no filter.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct RowQuery {
+    /// Applied in order; the driver appends the primary key (or row id) so paging stays stable.
+    pub sort: Vec<SortKey>,
+    /// A raw SQL boolean expression, e.g. `status = 'paid' and total > 10`. Must be a single
+    /// expression: a top-level `;` is rejected (see [`crate::dialect::normalize_filter`]).
+    pub filter: Option<String>,
+}
+
+/// A column as described in the structure view.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ColumnDetail {
+    pub name: String,
+    pub type_name: String,
+    pub is_nullable: bool,
+    /// Default or generation expression as the database spells it (`nextval(…)`, `CURRENT_TIMESTAMP`,
+    /// `auto_increment`, `GENERATED ALWAYS AS IDENTITY`…).
+    pub default_value: Option<String>,
+    pub is_primary_key: bool,
+    pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct IndexInfo {
+    pub name: String,
+    /// Column names in index order; expressions are shown as written (`lower(email)`).
+    pub columns: Vec<String>,
+    pub is_unique: bool,
+    pub is_primary: bool,
+    /// Full `CREATE INDEX` statement when the database keeps one (Postgres, SQLite).
+    pub definition: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ForeignKeyInfo {
+    /// Constraint name (empty for SQLite, which doesn't name them).
+    pub name: String,
+    pub columns: Vec<String>,
+    pub referenced_schema: String,
+    pub referenced_table: String,
+    /// Empty when SQLite references the parent's primary key implicitly.
+    pub referenced_columns: Vec<String>,
+    /// `NO ACTION`, `CASCADE`, `SET NULL`…
+    pub on_update: String,
+    pub on_delete: String,
+}
+
+/// Everything the structure view shows for a table or view (`Driver::describe_table`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct TableStructure {
+    pub columns: Vec<ColumnDetail>,
+    /// Primary key columns in key order (empty for views and keyless tables).
+    pub primary_key: Vec<String>,
+    pub indexes: Vec<IndexInfo>,
+    pub foreign_keys: Vec<ForeignKeyInfo>,
+    /// `CREATE TABLE` / `CREATE VIEW` (plus indexes) as SQL, when it can be produced.
+    pub ddl: Option<String>,
+}
+
 /// A single cell. Drivers decode wire types into one of these.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {

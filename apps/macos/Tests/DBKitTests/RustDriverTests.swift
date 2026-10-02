@@ -135,3 +135,32 @@ private let sqliteSeeded = FileManager.default.fileExists(atPath: Drivers.sample
     named.database = "app"
     #expect(named.defaultName == "app" && named.defaultDatabase == "app")
 }
+
+@Test func sortsMockRowsAndRejectsFiltersThroughFFI() async throws {
+    let driver = Drivers.make(for: appDev)
+    let users = TableInfo(schema: "public", name: "users")
+    let page = try await driver.fetchRows(
+        of: users, query: RowQuery(sort: [SortKey(column: "id", descending: true)]), limit: 2, offset: 0)
+    #expect(page.rows.map { $0.values[0] } == [.int(248), .int(247)])
+    await #expect(throws: DatabaseError.self) {
+        try await driver.fetchRows(of: users, query: RowQuery(filter: "id = 1"), limit: 2, offset: 0)
+    }
+    let structure = try await driver.describeTable(users)
+    #expect(structure.primaryKey == ["id"] && structure.columns.first?.isPrimaryKey == true)
+}
+
+@Test(.enabled(if: postgresEnabled)) func realPostgresFilterAndStructure() async throws {
+    let driver = Drivers.make(for: devDB)
+    let orders = TableInfo(schema: "public", name: "orders")
+    let page = try await driver.fetchRows(
+        of: orders, query: RowQuery(sort: [SortKey(column: "id", descending: true)], filter: "id <= 5"), limit: 10, offset: 0)
+    #expect(page.rows.count == 5 && page.totalCount == 5 && page.rows.first?.values.first == .int(5))
+    do {
+        _ = try await driver.fetchRows(of: orders, query: RowQuery(filter: "1 = 1; delete from orders"), limit: 1, offset: 0)
+        Issue.record("a second statement must be rejected")
+    } catch DatabaseError.query {}
+    let structure = try await driver.describeTable(orders)
+    #expect(structure.foreignKeys.contains { $0.referencedTable == "users" && $0.columns == ["user_id"] })
+    #expect(structure.ddl?.hasPrefix("CREATE TABLE \"public\".\"orders\"") == true)
+    await driver.disconnect()
+}

@@ -228,6 +228,27 @@ fn value(column: &ColumnInfo, i: u64) -> Value {
     }
 }
 
+/// Sort order for sample values: numbers numerically, NULLs last (like Postgres' default).
+fn compare(a: &Value, b: &Value) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let number = |v: &Value| match v {
+        Value::Int(i) => Some(*i as f64),
+        Value::Float(f) => Some(*f),
+        Value::Decimal(d) => d.parse().ok(),
+        _ => None,
+    };
+    match (a, b) {
+        (Value::Null, Value::Null) => Ordering::Equal,
+        (Value::Null, _) => Ordering::Greater,
+        (_, Value::Null) => Ordering::Less,
+        (Value::Bool(x), Value::Bool(y)) => x.cmp(y),
+        _ => match (number(a), number(b)) {
+            (Some(x), Some(y)) => x.total_cmp(&y),
+            _ => a.display().cmp(&b.display()),
+        },
+    }
+}
+
 pub struct MockDriver {
     config: ConnectionConfig,
     connected: AtomicBool,
@@ -326,18 +347,103 @@ impl Driver for MockDriver {
             .collect())
     }
 
-    async fn fetch_rows(&self, table: &TableInfo, limit: u32, offset: u64) -> Result<QueryResult> {
+    async fn fetch_rows(&self, table: &TableInfo, query: &RowQuery, limit: u32, offset: u64) -> Result<QueryResult> {
         self.connect().await?;
         let (_, spec) = self
             .find(Some(&table.schema), &table.name)
             .ok_or_else(|| Error::TableNotFound(table.qualified_name()))?;
+        if query.filter.is_some() {
+            return Err(Error::Unsupported("filters need a real database (sample data can’t evaluate SQL)".into()));
+        }
+        let row = |i: u64| -> Vec<Value> { spec.columns.iter().map(|c| value(c, i)).collect() };
         let end = spec.rows.min(offset + limit as u64);
+        let rows = if query.sort.is_empty() {
+            (offset..end.max(offset)).map(row).collect()
+        } else {
+            // Sorting needs every row; sample tables are small enough to generate whole.
+            let keys: Vec<(usize, bool)> = query
+                .sort
+                .iter()
+                .map(|k| {
+                    let index = spec.columns.iter().position(|c| c.name == k.column).ok_or_else(|| {
+                        Error::Query(format!("Can’t sort by “{}”: no such column", k.column))
+                    })?;
+                    Ok((index, k.descending))
+                })
+                .collect::<Result<_>>()?;
+            let mut all: Vec<Vec<Value>> = (0..spec.rows).map(row).collect();
+            all.sort_by(|a, b| {
+                keys.iter()
+                    .map(|&(i, descending)| {
+                        let order = compare(&a[i], &b[i]);
+                        if descending { order.reverse() } else { order }
+                    })
+                    .find(|o| o.is_ne())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            all.into_iter().skip(offset as usize).take(limit as usize).collect()
+        };
         Ok(QueryResult {
             columns: spec.columns.clone(),
-            rows: (offset..end.max(offset)).map(|i| spec.columns.iter().map(|c| value(c, i)).collect()).collect(),
+            rows,
             total_count: Some(spec.rows),
             rows_affected: None,
             truncated: false,
+        })
+    }
+
+    async fn describe_table(&self, table: &TableInfo) -> Result<TableStructure> {
+        self.connect().await?;
+        let (schema, spec) = self
+            .find(Some(&table.schema), &table.name)
+            .ok_or_else(|| Error::TableNotFound(table.qualified_name()))?;
+        let dialect = crate::dialect::Dialect(self.config.kind);
+        let primary_key: Vec<String> = spec.columns.iter().filter(|c| c.is_primary_key).map(|c| c.name.clone()).collect();
+        let relation = dialect.quote_relation(schema, spec.name);
+        let ddl = if spec.kind == TableKind::View {
+            format!("CREATE VIEW {relation} AS\nSELECT 1;")
+        } else {
+            let mut lines: Vec<String> = spec
+                .columns
+                .iter()
+                .map(|c| {
+                    let null = if c.is_nullable { "" } else { " NOT NULL" };
+                    format!("    {} {}{null}", dialect.quote_ident(&c.name), c.type_name)
+                })
+                .collect();
+            if !primary_key.is_empty() {
+                let keys: Vec<String> = primary_key.iter().map(|k| dialect.quote_ident(k)).collect();
+                lines.push(format!("    PRIMARY KEY ({})", keys.join(", ")));
+            }
+            format!("CREATE TABLE {relation} (\n{}\n);", lines.join(",\n"))
+        };
+        Ok(TableStructure {
+            columns: spec
+                .columns
+                .iter()
+                .map(|c| ColumnDetail {
+                    name: c.name.clone(),
+                    type_name: c.type_name.clone(),
+                    is_nullable: c.is_nullable,
+                    default_value: None,
+                    is_primary_key: c.is_primary_key,
+                    comment: None,
+                })
+                .collect(),
+            indexes: if primary_key.is_empty() || spec.kind == TableKind::View {
+                Vec::new()
+            } else {
+                vec![IndexInfo {
+                    name: format!("{}_pkey", spec.name),
+                    columns: primary_key.clone(),
+                    is_unique: true,
+                    is_primary: true,
+                    definition: None,
+                }]
+            },
+            primary_key,
+            foreign_keys: Vec::new(),
+            ddl: Some(ddl),
         })
     }
 
@@ -371,7 +477,7 @@ impl Driver for MockDriver {
         })?;
         let wanted: u64 = caps.get(4).and_then(|m| m.as_str().parse().ok()).unwrap_or(spec.rows).min(spec.rows);
         let kept = max_rows.map_or(wanted, |m| wanted.min(m as u64));
-        let mut full = self.fetch_rows(&TableInfo::new(schema, spec.name), kept as u32, 0).await?;
+        let mut full = self.fetch_rows(&TableInfo::new(schema, spec.name), &RowQuery::default(), kept as u32, 0).await?;
         full.truncated = kept < wanted;
         full.total_count = full.truncated.then_some(wanted);
 
@@ -435,6 +541,29 @@ mod tests {
         assert_eq!(result.rows.len(), 50);
         assert!(result.rows.iter().all(|r| r.len() == result.columns.len()));
         assert_eq!(result.total_count, Some(248));
+    }
+
+    #[test]
+    fn sorts_sample_rows_and_rejects_filters() {
+        let users = TableInfo::new("public", "users");
+        let query = RowQuery { sort: vec![SortKey { column: "id".into(), descending: true }], filter: None };
+        let page = block_on(app_dev().fetch_rows_with(users.clone(), query, 3, 0)).unwrap();
+        let ids: Vec<_> = page.rows.iter().map(|r| r[0].clone()).collect();
+        assert_eq!(ids, [Value::Int(248), Value::Int(247), Value::Int(246)]);
+
+        let filtered = RowQuery { filter: Some("id = 1".into()), ..Default::default() };
+        assert!(matches!(block_on(app_dev().fetch_rows_with(users.clone(), filtered, 3, 0)), Err(Error::Unsupported(_))));
+        // Blank filters are no filter at all.
+        let blank = RowQuery { filter: Some("  ".into()), ..Default::default() };
+        assert_eq!(block_on(app_dev().fetch_rows_with(users, blank, 3, 0)).unwrap().rows.len(), 3);
+    }
+
+    #[test]
+    fn describes_sample_tables() {
+        let s = block_on(app_dev().describe_table(TableInfo::new("public", "users"))).unwrap();
+        assert_eq!(s.primary_key, ["id"]);
+        assert_eq!(s.columns.len(), 6);
+        assert!(s.ddl.unwrap().starts_with("CREATE TABLE \"public\".\"users\""));
     }
 
     #[test]

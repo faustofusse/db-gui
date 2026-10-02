@@ -3,7 +3,7 @@
 
 use std::time::{Duration, Instant};
 
-use dbcore::{mock, Connection, ConnectionConfig, Error, SslMode, TableInfo, TableKind, Value};
+use dbcore::{mock, Connection, ConnectionConfig, Error, RowQuery, SortKey, SslMode, TableInfo, TableKind, Value};
 
 fn enabled() -> bool {
     let on = std::env::var("DBEAR_TEST_MYSQL").is_ok_and(|v| v == "1");
@@ -217,4 +217,51 @@ fn reports_and_closes_connections() {
     assert!(!block_on(conn.is_connected()));
     // Reconnects lazily.
     assert!(!block_on(conn.list_schemas()).unwrap().is_empty());
+}
+
+#[test]
+fn sorts_filters_and_rejects_smuggled_statements() {
+    if !enabled() {
+        return;
+    }
+    let customers = TableInfo::new("shop", "customers");
+    let query = RowQuery { sort: vec![SortKey { column: "balance".into(), descending: true }], filter: Some("is_active".into()) };
+    let page = block_on(dev().fetch_rows_with(customers.clone(), query, 500, 0)).unwrap();
+    assert!(!page.rows.is_empty());
+    let balances: Vec<f64> = column(&page, "balance").iter().map(|v| v.display().parse().unwrap()).collect();
+    assert!(balances.windows(2).all(|w| w[0] >= w[1]));
+    assert!(column(&page, "is_active").iter().all(|v| **v == Value::Bool(true)));
+    assert_eq!(page.total_count, Some(page.rows.len() as u64));
+
+    // The text protocol would run a second statement: the core refuses it before it gets there.
+    for evil in [r"name = '\'' ; drop table shop.orders; '", "1 = 1 # '\n; drop table shop.orders; -- '", "1--1; drop table shop.orders"] {
+        let filter = RowQuery { filter: Some(evil.into()), ..Default::default() };
+        let err = block_on(dev().fetch_rows_with(customers.clone(), filter, 1, 0)).unwrap_err();
+        assert!(matches!(err, Error::Query(_)), "{evil}: {err:?}");
+    }
+    assert!(block_on(dev().fetch_rows(TableInfo::new("shop", "orders"), 1, 0)).is_ok());
+}
+
+#[test]
+fn describes_tables_and_views() {
+    if !enabled() {
+        return;
+    }
+    let orders = block_on(dev().describe_table(TableInfo::new("shop", "orders"))).unwrap();
+    assert_eq!(orders.primary_key, ["id"]);
+    let id = orders.columns.iter().find(|c| c.name == "id").unwrap();
+    assert_eq!(id.default_value.as_deref(), Some("auto_increment"));
+    let status = orders.columns.iter().find(|c| c.name == "status").unwrap();
+    assert_eq!(status.default_value.as_deref(), Some("pending"));
+    let fk = &orders.foreign_keys[0];
+    assert_eq!((fk.columns.as_slice(), fk.referenced_table.as_str()), (&["customer_id".to_string()][..], "customers"));
+    assert!(orders.indexes.iter().any(|i| i.is_primary && i.columns == ["id"]));
+    assert!(orders.ddl.unwrap().starts_with("CREATE TABLE `orders`"));
+
+    let items = block_on(dev().describe_table(TableInfo::new("shop", "order_items"))).unwrap();
+    assert_eq!(items.primary_key, ["order_id", "product_id"]);
+
+    let view = block_on(dev().describe_table(TableInfo::new("shop", "paid_orders"))).unwrap();
+    assert!(view.ddl.unwrap().contains("VIEW `shop`.`paid_orders` AS"));
+    assert!(matches!(block_on(dev().describe_table(TableInfo::new("shop", "nope"))), Err(Error::TableNotFound(_))));
 }

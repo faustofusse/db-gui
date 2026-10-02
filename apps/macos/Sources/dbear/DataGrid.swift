@@ -12,6 +12,12 @@ struct GridPaging {
     var retry: () -> Void
 }
 
+/// Server-side sorting for grids backed by a table: header clicks call `toggle` with the column name.
+struct GridSorting {
+    var keys: [SortKey]
+    var toggle: (String) -> Void
+}
+
 /// Read-only result grid used by table tabs and script results.
 ///
 /// Backed by a plain `NSTableView` rather than SwiftUI's `Table`: cells are reused text fields,
@@ -24,16 +30,22 @@ struct DataGrid: View {
     var version: Int = 0
     var duration: Duration? = nil
     var paging: GridPaging? = nil
+    var sorting: GridSorting? = nil
+    /// New rows are loading (re-sort, filter, refresh) while these stay on screen.
+    var isReloading = false
+    /// Shown at the start of the status bar (e.g. the Data | Structure switch).
+    var statusLeading: AnyView? = nil
 
     var body: some View {
         let query = search.trimmingCharacters(in: .whitespaces)
-        GridTable(result: result, search: query, version: version, paging: paging)
+        GridTable(result: result, search: query, version: version, paging: paging, sorting: sorting)
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 StatusBar(
                     shown: query.isEmpty ? result.rows.count : matchCount(query),
                     loaded: result.rows.count, total: result.totalCount,
                     truncated: result.truncated, isFiltered: !query.isEmpty,
-                    columns: result.columns.count, duration: duration, paging: paging
+                    columns: result.columns.count, duration: duration, paging: paging,
+                    isReloading: isReloading, leading: statusLeading
                 )
             }
     }
@@ -50,6 +62,7 @@ private struct GridTable: NSViewRepresentable {
     let search: String
     let version: Int
     let paging: GridPaging?
+    let sorting: GridSorting?
 
     func makeCoordinator() -> GridData { GridData() }
 
@@ -63,6 +76,8 @@ private struct GridTable: NSViewRepresentable {
         table.allowsMultipleSelection = true
         table.allowsColumnReordering = true
         table.allowsColumnResizing = true
+        // Header clicks sort instead of selecting the column.
+        table.allowsColumnSelection = false
         table.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
         table.headerView = NSTableHeaderView()
         table.dataSource = context.coordinator
@@ -82,7 +97,7 @@ private struct GridTable: NSViewRepresentable {
     }
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
-        context.coordinator.update(result: result, search: search, version: version, paging: paging)
+        context.coordinator.update(result: result, search: search, version: version, paging: paging, sorting: sorting)
     }
 
     static func dismantleNSView(_ scroll: NSScrollView, coordinator: GridData) {
@@ -100,6 +115,7 @@ final class GridData: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     private var search = ""
     private var version = Int.min
     private var paging: GridPaging?
+    private var sorting: GridSorting?
     private var observer: NSObjectProtocol?
     private var loadRequested = false
 
@@ -122,8 +138,10 @@ final class GridData: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         if let observer { NotificationCenter.default.removeObserver(observer) }
     }
 
-    func update(result: QueryResult, search: String, version: Int, paging: GridPaging?) {
+    func update(result: QueryResult, search: String, version: Int, paging: GridPaging?, sorting: GridSorting?) {
         self.paging = paging
+        self.sorting = sorting
+        defer { if let table { showSortIndicators(table) } }
         if !(paging?.isLoading ?? false) { loadRequested = false }
         guard let table else { return }
 
@@ -176,12 +194,32 @@ final class GridData: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         paging.loadMore()
     }
 
+    /// Native ▲/▼ in the header of the sorted column (only the primary key of the sort).
+    private func showSortIndicators(_ table: NSTableView) {
+        let primary = sorting?.keys.first
+        var highlighted: NSTableColumn?
+        for column in table.tableColumns {
+            guard let index = Int(column.identifier.rawValue), columns.indices.contains(index) else { continue }
+            let sorted = primary?.column == columns[index].name
+            let image = sorted ? NSImage(named: primary!.descending ? "NSDescendingSortIndicator" : "NSAscendingSortIndicator") : nil
+            if table.indicatorImage(in: column) !== image { table.setIndicatorImage(image, in: column) }
+            if sorted { highlighted = column }
+        }
+        if table.highlightedTableColumn !== highlighted { table.highlightedTableColumn = highlighted }
+    }
+
+    func tableView(_ tableView: NSTableView, didClick tableColumn: NSTableColumn) {
+        guard let sorting, let index = Int(tableColumn.identifier.rawValue), columns.indices.contains(index) else { return }
+        sorting.toggle(columns[index].name)
+    }
+
     private func rebuildColumns(_ table: NSTableView) {
         table.tableColumns.forEach(table.removeTableColumn)
         for (index, info) in columns.enumerated() {
             let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(String(index)))
             column.title = info.name
-            column.headerToolTip = info.typeName.isEmpty ? nil : "\(info.name) · \(info.typeName)"
+            let type = info.typeName.isEmpty ? info.name : "\(info.name) · \(info.typeName)"
+            column.headerToolTip = sorting == nil ? type : "\(type)\nClick to sort"
             column.minWidth = 40
             column.width = Self.idealWidth(for: info)
             column.headerCell.alignment = info.isNumeric ? .right : .left
@@ -327,15 +365,22 @@ private struct StatusBar: View {
     let columns: Int
     let duration: Duration?
     let paging: GridPaging?
+    var isReloading = false
+    var leading: AnyView?
 
     var body: some View {
-        HStack(spacing: 6) {
+        BottomBar {
+            if let leading {
+                leading
+            }
             Text(rowsText)
             if truncated {
                 Image(systemName: "info.circle")
                     .help("Scripts keep the first \(loaded.formatted()) rows. Add a LIMIT or open the table to page through everything.")
             }
-            if let paging {
+            if isReloading {
+                ProgressView().controlSize(.mini)
+            } else if let paging {
                 if paging.isLoading {
                     ProgressView().controlSize(.mini)
                     Text("Loading more…")
@@ -351,13 +396,6 @@ private struct StatusBar: View {
             }
             Text("\(columns) columns")
         }
-        .font(.callout)
-        .foregroundStyle(.secondary)
-        .monospacedDigit()
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-        .background(.bar)
-        .overlay(alignment: .top) { Divider() }
     }
 
     private var rowsText: String {
@@ -373,5 +411,21 @@ private struct StatusBar: View {
             return "\(loaded.formatted()) of \(max(total, loaded).formatted()) rows"
         }
         return hasMore ? "\(loaded.formatted())+ rows" : "\(loaded.formatted()) rows"
+    }
+}
+
+/// The strip under a grid or the structure view: secondary text on the bar material.
+struct BottomBar<Content: View>: View {
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        HStack(spacing: 6) { content }
+            .font(.callout)
+            .foregroundStyle(.secondary)
+            .monospacedDigit()
+            .padding(.horizontal, 12)
+            .frame(height: 30)
+            .background(.bar)
+            .overlay(alignment: .top) { Divider() }
     }
 }
