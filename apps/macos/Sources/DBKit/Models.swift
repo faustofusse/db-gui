@@ -141,11 +141,16 @@ public struct QueryResult: Sendable {
     public var totalCount: Int?
     /// Set for statements that return no rows (INSERT/UPDATE/DDL…).
     public var rowsAffected: Int?
+    /// A script result was cut at the row limit; `totalCount` is how many rows it really returned.
+    public var truncated: Bool
 
-    public init(columns: [ColumnInfo], rows: [Row], totalCount: Int? = nil, rowsAffected: Int? = nil) {
+    public init(
+        columns: [ColumnInfo], rows: [Row], totalCount: Int? = nil, rowsAffected: Int? = nil, truncated: Bool = false
+    ) {
         self.columns = columns
         self.rows = rows
         self.totalCount = totalCount
         self.rowsAffected = rowsAffected
+        self.truncated = truncated
     }
 }

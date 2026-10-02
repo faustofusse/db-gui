@@ -87,8 +87,12 @@ view, a partitioned table, a table without a primary key and an empty schema.
   `Decimal` string.
 - Each connection opens two server sessions: one for browsing and one for scripts, so a long
   script doesn't block browsing.
-- Table pages are ordered by primary key (or `ctid` if there's none). `total_count` is exact under
-  100k estimated rows and the planner estimate above that.
+- Table pages are ordered by primary key (or `ctid` if there's none). `total_count` is only
+  computed for the first page: exact under 100k estimated rows, the planner estimate above that.
+  The app loads 500 rows at a time and fetches the next page as you scroll near the end.
+- Script results keep at most `max_rows` rows (10,000 in the app). Extra rows are counted, not
+  kept, and the result is marked `truncated`. The stream is drained rather than cancelled, so
+  later statements in the script still run.
 - Scripts can hold several statements. You get the last result set, or the affected-row count if
   no statement returned rows.
 - Cancellation: `Connection::cancel()` (Stop / ⌘. in the app) sends a Postgres cancel request.

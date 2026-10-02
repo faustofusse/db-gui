@@ -107,10 +107,15 @@ impl Connection {
         on_runtime(async move { d.fetch_rows(&table, limit, offset).await }).await
     }
 
-    /// Dropping the returned future also cancels the query on the server.
+    /// Runs a script and keeps every row. Dropping the returned future also cancels the query on the server.
     pub async fn execute(&self, sql: String) -> Result<QueryResult> {
+        self.execute_limited(sql, None).await
+    }
+
+    /// Like [`Connection::execute`], keeping at most `max_rows` rows (see [`QueryResult::truncated`]).
+    pub async fn execute_limited(&self, sql: String, max_rows: Option<u32>) -> Result<QueryResult> {
         let d = self.driver.clone();
-        on_runtime(async move { d.execute(&sql).await }).await
+        on_runtime(async move { d.execute(&sql, max_rows).await }).await
     }
 
     /// Cancels the running [`Connection::execute`], which then fails with [`Error::Cancelled`].

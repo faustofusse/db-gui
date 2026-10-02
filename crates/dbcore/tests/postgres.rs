@@ -60,9 +60,12 @@ fn fetches_pages_in_primary_key_order() {
         return;
     }
     let users = TableInfo::new("public", "users");
+    let first = block_on(dev().fetch_rows(users.clone(), 50, 0)).unwrap();
+    assert_eq!(first.total_count, Some(248));
     let page = block_on(dev().fetch_rows(users.clone(), 50, 100)).unwrap();
     assert_eq!(page.rows.len(), 50);
-    assert_eq!(page.total_count, Some(248));
+    // Only the first page pays for count(*).
+    assert_eq!(page.total_count, None);
     assert_eq!(page.rows[0][0], Value::Int(101));
     assert_eq!(page.rows[49][0], Value::Int(150));
 
@@ -111,7 +114,7 @@ fn pages_tables_without_primary_key_and_views() {
     }
     let log = block_on(dev().fetch_rows(TableInfo::new("analytics", "raw_log"), 10, 290)).unwrap();
     assert_eq!(log.rows.len(), 10);
-    assert_eq!(log.total_count, Some(300));
+    assert_eq!(log.total_count, None); // not the first page
     assert_eq!(log.rows[0][1], Value::Int(1)); // smallint
 
     let view = block_on(dev().fetch_rows(TableInfo::new("public", "active_users"), 500, 0)).unwrap();
@@ -166,6 +169,30 @@ fn scripts_return_last_result_or_affected_rows() {
     // The temp table lives on the script session, so it's still there.
     let wrapped = block_on(conn.execute("begin; select count(*) from t; commit".into())).unwrap();
     assert_eq!(wrapped.rows[0][0], Value::Text("5".into()));
+}
+
+#[test]
+fn caps_script_rows_but_runs_the_whole_script() {
+    if !enabled() {
+        return;
+    }
+    let conn = dev();
+    let r = block_on(conn.execute_limited("select g from generate_series(1, 25000) g".into(), Some(1000))).unwrap();
+    assert_eq!((r.rows.len(), r.truncated, r.total_count), (1000, true, Some(25_000)));
+    assert_eq!(r.rows[999][0], Value::Int(1000));
+
+    // Statements after the capped one still run (the stream is drained, not cancelled).
+    let script = "create temp table capped (x int); \
+                  insert into capped select generate_series(1, 50); \
+                  select * from capped; \
+                  insert into capped values (51)";
+    let r = block_on(conn.execute_limited(script.into(), Some(10))).unwrap();
+    assert_eq!(r.rows.len(), 10);
+    let count = block_on(conn.execute("select count(*) from capped".into())).unwrap();
+    assert_eq!(count.rows[0][0], Value::Int(51));
+
+    let small = block_on(conn.execute_limited("select 1".into(), Some(10))).unwrap();
+    assert_eq!((small.truncated, small.total_count), (false, None));
 }
 
 #[test]

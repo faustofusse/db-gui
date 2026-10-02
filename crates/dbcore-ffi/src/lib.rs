@@ -83,6 +83,7 @@ pub struct QueryResult {
     pub rows: Vec<Vec<Value>>,
     pub total_count: Option<u64>,
     pub rows_affected: Option<u64>,
+    pub truncated: bool,
 }
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]
@@ -143,8 +144,9 @@ impl Connection {
         Ok(self.inner.fetch_rows(table.into(), limit, offset).await?.into())
     }
 
-    pub async fn execute(&self, sql: String) -> Result<QueryResult, DbError> {
-        Ok(self.inner.execute(sql).await?.into())
+    /// Runs a script, keeping at most `max_rows` rows (`None` = all).
+    pub async fn execute(&self, sql: String, max_rows: Option<u32>) -> Result<QueryResult, DbError> {
+        Ok(self.inner.execute_limited(sql, max_rows).await?.into())
     }
 
     /// Cancels the running `execute`, which then fails with `DbError::Cancelled`.
@@ -385,6 +387,7 @@ impl From<dbcore::QueryResult> for QueryResult {
             rows: r.rows.into_iter().map(|row| row.into_iter().map(Into::into).collect()).collect(),
             total_count: r.total_count,
             rows_affected: r.rows_affected,
+            truncated: r.truncated,
         }
     }
 }

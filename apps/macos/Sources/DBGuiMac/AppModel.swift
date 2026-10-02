@@ -22,8 +22,17 @@ final class TableTab: Identifiable {
     let table: TableInfo
     /// Preview tabs get replaced by the next table you click (shown in italics).
     var isPreview: Bool
+    /// Rows loaded so far (pages are appended as you scroll); `totalCount` comes from the first page.
     var data: LoadState<QueryResult> = .idle
+    var isLoadingMore = false
+    var loadMoreError: String?
+    /// The last page came back short: everything is loaded.
+    var reachedEnd = false
+    /// Bumped on reload so pages from an older load are dropped.
+    var generation = 0
     var search = ""
+
+    var canLoadMore: Bool { data.value != nil && !reachedEnd && !isLoadingMore && loadMoreError == nil }
 
     init(connection: ConnectionConfig, table: TableInfo, isPreview: Bool) {
         self.connection = connection
@@ -149,7 +158,10 @@ final class AppModel {
     var tabs: [WorkspaceTab] = []
     var activeTabID: UUID?
 
-    var pageSize = 200
+    /// Rows per table page (loaded as you scroll).
+    let pageSize = 500
+    /// Script results keep at most this many rows; the rest are counted, not kept.
+    let scriptRowLimit = 10_000
     /// Incremented by ⌘F to focus the toolbar search field.
     var searchFocusRequest = 0
 
@@ -470,14 +482,48 @@ final class AppModel {
         }
     }
 
+    /// (Re)loads the first page of a table tab.
     func load(_ tab: TableTab) async {
+        tab.generation += 1
+        let generation = tab.generation
         tab.data = .loading
+        tab.isLoadingMore = false
+        tab.loadMoreError = nil
+        tab.reachedEnd = false
         do {
-            tab.data = .loaded(try await driver(for: tab.connection).fetchRows(of: tab.table, limit: pageSize, offset: 0))
+            let page = try await driver(for: tab.connection).fetchRows(of: tab.table, limit: pageSize, offset: 0)
+            guard generation == tab.generation else { return }
+            tab.reachedEnd = page.rows.count < pageSize || page.totalCount.map { page.rows.count >= $0 } == true
+            tab.data = .loaded(page)
         } catch {
+            guard generation == tab.generation else { return }
             tab.data = .failed(error.localizedDescription)
         }
         await updateConnectionState(tab.connection.id)
+    }
+
+    /// Appends the next page (called when the grid scrolls near the last loaded row).
+    func loadMore(_ tab: TableTab) async {
+        guard tab.canLoadMore, let loaded = tab.data.value else { return }
+        let generation = tab.generation
+        tab.isLoadingMore = true
+        defer { if generation == tab.generation { tab.isLoadingMore = false } }
+        do {
+            let page = try await driver(for: tab.connection)
+                .fetchRows(of: tab.table, limit: pageSize, offset: loaded.rows.count)
+            guard generation == tab.generation, var current = tab.data.value else { return }
+            current.rows += page.rows
+            tab.reachedEnd = page.rows.count < pageSize
+            tab.data = .loaded(current)
+        } catch {
+            guard generation == tab.generation else { return }
+            tab.loadMoreError = error.localizedDescription
+        }
+    }
+
+    func retryLoadMore(_ tab: TableTab) {
+        tab.loadMoreError = nil
+        Task { await loadMore(tab) }
     }
 
     func run(_ tab: ScriptTab) async {
@@ -487,7 +533,7 @@ final class AppModel {
         let clock = ContinuousClock()
         let start = clock.now
         do {
-            let result = try await driver(for: tab.connection).execute(tab.text)
+            let result = try await driver(for: tab.connection).execute(tab.text, maxRows: scriptRowLimit)
             tab.lastDuration = clock.now - start
             tab.result = .loaded(result)
         } catch DatabaseError.cancelled {

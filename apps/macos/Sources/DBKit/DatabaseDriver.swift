@@ -33,10 +33,19 @@ public protocol DatabaseDriver: Sendable {
     /// Whether a server connection is open right now (false after the server drops it).
     func isConnected() async -> Bool
     func listSchemas() async throws -> [Schema]
+    /// One page of a table. `totalCount` is only set for the first page (`offset == 0`).
     func fetchRows(of table: TableInfo, limit: Int, offset: Int) async throws -> QueryResult
-    func execute(_ sql: String) async throws -> QueryResult
+    /// Runs a script keeping at most `maxRows` rows (nil = all); see `QueryResult.truncated`.
+    func execute(_ sql: String, maxRows: Int?) async throws -> QueryResult
     /// Stops the running `execute`, which then throws `DatabaseError.cancelled`.
     func cancel() async
+}
+
+extension DatabaseDriver {
+    /// Runs a script and keeps every row.
+    public func execute(_ sql: String) async throws -> QueryResult {
+        try await execute(sql, maxRows: nil)
+    }
 }
 
 public enum Drivers {

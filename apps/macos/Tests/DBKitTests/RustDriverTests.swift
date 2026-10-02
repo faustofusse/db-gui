@@ -76,3 +76,11 @@ private let postgresEnabled = ProcessInfo.processInfo.environment["DBGUI_TEST_PO
     #expect(result.columns.map(\.name) == ["id", "total"])
     #expect(result.rows.first?.values.last.map { if case .decimal = $0 { true } else { false } } == true)
 }
+
+@Test func capsScriptRows() async throws {
+    let driver = Drivers.make(for: appDev)
+    let capped = try await driver.execute("select * from users", maxRows: 100)
+    #expect(capped.rows.count == 100 && capped.truncated && capped.totalCount == 248)
+    let all = try await driver.execute("select * from users")
+    #expect(all.rows.count == 248 && !all.truncated)
+}

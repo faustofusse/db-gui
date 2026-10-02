@@ -294,12 +294,13 @@ impl Driver for MockDriver {
             rows: (offset..end.max(offset)).map(|i| spec.columns.iter().map(|c| value(c, i)).collect()).collect(),
             total_count: Some(spec.rows),
             rows_affected: None,
+            truncated: false,
         })
     }
 
     /// Understands just enough SQL to be useful for UI work:
     /// `SELECT * | col, col FROM [schema.]table [LIMIT n]`.
-    async fn execute(&self, sql: &str) -> Result<QueryResult> {
+    async fn execute(&self, sql: &str, max_rows: Option<u32>) -> Result<QueryResult> {
         self.connect().await?;
 
         static SELECT: OnceLock<Regex> = OnceLock::new();
@@ -325,12 +326,15 @@ impl Driver for MockDriver {
         let (schema, spec) = self.find(schema, name).ok_or_else(|| {
             Error::TableNotFound(schema.map_or(name.to_string(), |s| format!("{s}.{name}")))
         })?;
-        let limit = caps.get(4).and_then(|m| m.as_str().parse().ok()).unwrap_or(200);
-        let full = self.fetch_rows(&TableInfo::new(schema, spec.name), limit, 0).await?;
+        let wanted: u64 = caps.get(4).and_then(|m| m.as_str().parse().ok()).unwrap_or(spec.rows).min(spec.rows);
+        let kept = max_rows.map_or(wanted, |m| wanted.min(m as u64));
+        let mut full = self.fetch_rows(&TableInfo::new(schema, spec.name), kept as u32, 0).await?;
+        full.truncated = kept < wanted;
+        full.total_count = full.truncated.then_some(wanted);
 
         let select_list = caps[1].trim();
         if select_list == "*" {
-            return Ok(QueryResult { total_count: None, ..full });
+            return Ok(full);
         }
         let indices = select_list
             .split(',')
@@ -345,7 +349,7 @@ impl Driver for MockDriver {
         Ok(QueryResult {
             columns: indices.iter().map(|&i| full.columns[i].clone()).collect(),
             rows: full.rows.iter().map(|r| indices.iter().map(|&i| r[i].clone()).collect()).collect(),
-            ..Default::default()
+            ..full
         })
     }
 }
@@ -399,6 +403,14 @@ mod tests {
         let cols: Vec<_> = result.columns.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(cols, ["id", "email"]);
         assert_eq!(result.rows.len(), 5);
+    }
+
+    #[test]
+    fn caps_script_rows() {
+        let r = block_on(app_dev().execute_limited("select * from users".into(), Some(100))).unwrap();
+        assert_eq!((r.rows.len(), r.truncated, r.total_count), (100, true, Some(248)));
+        let r = block_on(app_dev().execute_limited("select * from users limit 10".into(), Some(100))).unwrap();
+        assert_eq!((r.rows.len(), r.truncated, r.total_count), (10, false, None));
     }
 
     #[test]

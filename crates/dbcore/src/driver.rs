@@ -37,8 +37,12 @@ pub trait Driver: Send + Sync + 'static {
     /// Whether a server connection is currently open (and not dropped by the server).
     async fn is_connected(&self) -> bool;
     async fn list_schemas(&self) -> Result<Vec<Schema>>;
+    /// One page of a table in a stable order. `total_count` is only computed for the first
+    /// page (`offset == 0`), so loading further pages stays cheap.
     async fn fetch_rows(&self, table: &TableInfo, limit: u32, offset: u64) -> Result<QueryResult>;
-    async fn execute(&self, sql: &str) -> Result<QueryResult>;
+    /// Runs a script. At most `max_rows` rows are kept; the rest are counted and dropped
+    /// (`truncated` + `total_count`), so huge results can't exhaust memory.
+    async fn execute(&self, sql: &str, max_rows: Option<u32>) -> Result<QueryResult>;
     /// Cancels the running `execute`, if any. It then fails with [`Error::Cancelled`].
     async fn cancel(&self) {}
 }

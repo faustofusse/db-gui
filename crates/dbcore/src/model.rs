@@ -162,8 +162,11 @@ impl Value {
 pub struct QueryResult {
     pub columns: Vec<ColumnInfo>,
     pub rows: Vec<Vec<Value>>,
-    /// Total rows available (e.g. table size), when known.
+    /// Total rows available (e.g. table size), when known. For a truncated script result,
+    /// the number of rows the statement actually returned.
     pub total_count: Option<u64>,
+    /// `rows` stops at the requested row limit; the statement returned more.
+    pub truncated: bool,
     /// For statements that return no rows (INSERT/UPDATE/DDL…): rows affected, as reported by the server.
     pub rows_affected: Option<u64>,
 }

@@ -221,6 +221,7 @@ private struct NewTabButton: View {
 // MARK: - Table tab
 
 private struct TableTabView: View {
+    @Environment(AppModel.self) private var model
     let tab: TableTab
 
     var body: some View {
@@ -232,7 +233,14 @@ private struct TableTabView: View {
             ContentUnavailableView("Couldn’t Load Rows", systemImage: "exclamationmark.triangle",
                                    description: Text(message))
         case .loaded(let result):
-            DataGrid(result: result, search: tab.search)
+            DataGrid(
+                result: result, search: tab.search,
+                paging: GridPaging(
+                    hasMore: !tab.reachedEnd, isLoading: tab.isLoadingMore, error: tab.loadMoreError,
+                    loadMore: { Task { await model.loadMore(tab) } },
+                    retry: { model.retryLoadMore(tab) }
+                )
+            )
         }
     }
 }

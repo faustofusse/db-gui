@@ -42,8 +42,9 @@ final class RustDriver: DatabaseDriver {
         return QueryResult(page, firstRowID: offset)
     }
 
-    func execute(_ sql: String) async throws -> QueryResult {
-        QueryResult(try await bridged { try await connection.execute(sql: sql) }, firstRowID: 0)
+    func execute(_ sql: String, maxRows: Int?) async throws -> QueryResult {
+        let limit = maxRows.map { UInt32(clamping: max(0, $0)) }
+        return QueryResult(try await bridged { try await connection.execute(sql: sql, maxRows: limit) }, firstRowID: 0)
     }
 
     func cancel() async {
@@ -194,7 +195,8 @@ extension QueryResult {
             columns: r.columns.map(ColumnInfo.init),
             rows: r.rows.enumerated().map { Row(id: firstRowID + $0.offset, values: $0.element.map(DBValue.init)) },
             totalCount: r.totalCount.map { Int(clamping: $0) },
-            rowsAffected: r.rowsAffected.map { Int(clamping: $0) }
+            rowsAffected: r.rowsAffected.map { Int(clamping: $0) },
+            truncated: r.truncated
         )
     }
 }

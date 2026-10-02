@@ -185,6 +185,7 @@ impl Driver for PostgresDriver {
         result.columns = meta.columns;
 
         result.total_count = match meta.relkind.as_str() {
+            _ if offset > 0 => None,
             "r" | "p" | "m" if meta.reltuples >= EXACT_COUNT_THRESHOLD => {
                 Some(meta.reltuples as u64)
             }
@@ -200,11 +201,11 @@ impl Driver for PostgresDriver {
         Ok(result)
     }
 
-    async fn execute(&self, sql: &str) -> Result<QueryResult> {
+    async fn execute(&self, sql: &str, max_rows: Option<u32>) -> Result<QueryResult> {
         let client = self.query.client(&self.config).await?;
         // If this future is dropped (e.g. the caller's task is cancelled), stop the server-side query too.
         let guard = CancelOnDrop::new(client.cancel_token(), self.config.ssl_mode);
-        let result = run_script(&client, sql).await;
+        let result = run_script(&client, sql, max_rows).await;
         guard.disarm();
         result
     }
@@ -222,19 +223,19 @@ impl Driver for PostgresDriver {
 async fn run_single(client: &Client, sql: &str) -> Result<QueryResult> {
     let statement = client.prepare(sql).await.map_err(|e| query_error(&e, Some(sql)))?;
     let types: Vec<Type> = statement.columns().iter().map(|c| c.type_().clone()).collect();
-    collect(client, sql, Some(&types)).await
+    collect(client, sql, Some(&types), None).await
 }
 
 /// Runs a script of one or more statements and returns the last result set, or, if no
 /// statement returned rows, the affected-row count of the last one.
-async fn run_script(client: &Client, sql: &str) -> Result<QueryResult> {
+async fn run_script(client: &Client, sql: &str, max_rows: Option<u32>) -> Result<QueryResult> {
     match client.prepare(sql).await {
         Ok(statement) => {
             let types: Vec<Type> = statement.columns().iter().map(|c| c.type_().clone()).collect();
-            collect(client, sql, Some(&types)).await
+            collect(client, sql, Some(&types), max_rows).await
         }
         // Several statements can't be prepared; run them as-is with values left as text.
-        Err(e) if is_multi_statement_error(&e) => collect(client, sql, None).await,
+        Err(e) if is_multi_statement_error(&e) => collect(client, sql, None, max_rows).await,
         Err(e) => Err(query_error(&e, Some(sql))),
     }
 }
@@ -245,7 +246,10 @@ fn is_multi_statement_error(e: &tokio_postgres::Error) -> bool {
     })
 }
 
-async fn collect(client: &Client, sql: &str, types: Option<&[Type]>) -> Result<QueryResult> {
+/// Reads every message of a simple query. Rows past `max_rows` are counted but not decoded or kept:
+/// the stream is drained rather than cancelled, so later statements of a script still run.
+async fn collect(client: &Client, sql: &str, types: Option<&[Type]>, max_rows: Option<u32>) -> Result<QueryResult> {
+    let max_rows = max_rows.map_or(usize::MAX, |m| m as usize);
     let stream = client.simple_query_raw(sql).await.map_err(|e| query_error(&e, Some(sql)))?;
     pin_mut!(stream);
 
@@ -272,10 +276,15 @@ async fn collect(client: &Client, sql: &str, types: Option<&[Type]>) -> Result<Q
             }
             SimpleQueryMessage::Row(row) => {
                 if let Some(result) = current.as_mut() {
-                    let values = (0..row.len())
-                        .map(|i| decode(row.get(i), types.and_then(|t| t.get(i))))
-                        .collect();
-                    result.rows.push(values);
+                    if result.rows.len() < max_rows {
+                        let values = (0..row.len())
+                            .map(|i| decode(row.get(i), types.and_then(|t| t.get(i))))
+                            .collect();
+                        result.rows.push(values);
+                    } else {
+                        result.truncated = true;
+                        *result.total_count.get_or_insert(max_rows as u64) += 1;
+                    }
                 }
             }
             SimpleQueryMessage::CommandComplete(count) => match current.take() {
