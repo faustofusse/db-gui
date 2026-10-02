@@ -5,6 +5,7 @@ public enum DatabaseError: Error, Sendable, LocalizedError {
     case tableNotFound(String)
     case unsupported(String)
     case query(String)
+    case cancelled
     case `internal`(String)
 
     public var errorDescription: String? {
@@ -13,6 +14,7 @@ public enum DatabaseError: Error, Sendable, LocalizedError {
         case .tableNotFound(let name): "Table not found: \(name)"
         case .unsupported(let what): "Unsupported: \(what)"
         case .query(let msg): msg
+        case .cancelled: "Query cancelled"
         case .internal(let msg): "Internal error: \(msg)"
         }
     }
@@ -27,6 +29,8 @@ public protocol DatabaseDriver: Sendable {
     func listSchemas() async throws -> [Schema]
     func fetchRows(of table: TableInfo, limit: Int, offset: Int) async throws -> QueryResult
     func execute(_ sql: String) async throws -> QueryResult
+    /// Stops the running `execute`, which then throws `DatabaseError.cancelled`.
+    func cancel() async
 }
 
 public enum Drivers {

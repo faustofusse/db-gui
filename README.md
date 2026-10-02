@@ -7,7 +7,7 @@ Both share one Rust core.
 
 ```
 crates/
-  dbcore/        # shared core, pure Rust: models, Driver trait, drivers (mock for now), own tokio runtime
+  dbcore/        # shared core, pure Rust: models, Driver trait, drivers (Postgres + mock), own tokio runtime
   dbcore-ffi/    # UniFFI wrapper over dbcore → Swift bindings (staticlib)
 tools/
   uniffi-bindgen/  # bindings generator CLI (kept separate so its deps don't leak into the lib)
@@ -18,9 +18,12 @@ apps/
     Sources/DBCoreFFI/  # generated, git-ignored
     Frameworks/         # generated DBCoreFFI.xcframework, git-ignored
   linux/         # GPUI app (todo), depends on crates/dbcore directly
+dev/postgres/init.sql  # seed for the dev database
 scripts/
-  build-core.sh  # cargo build dbcore-ffi → xcframework + Swift bindings
-  bundle-mac.sh  # build-core + swift build → build/DBGui.app
+  build-core.sh      # cargo build dbcore-ffi → xcframework + Swift bindings
+  bundle-mac.sh      # build-core + swift build → build/DBGui.app
+  dev-db.sh          # dev Postgres in an Apple `container` (up/down/reset/psql/logs)
+  test-postgres.sh   # dev-db up + core integration tests
 ```
 
 ```
@@ -48,12 +51,42 @@ nix develop        # Rust toolchain from rust-toolchain.toml (+ rust-analyzer), 
 - Linux: also gives you clang, mold and the native libraries GPUI needs (Wayland/X11, Vulkan,
   fonts), with `LD_LIBRARY_PATH` set.
 
+## Dev database
+
+```sh
+./scripts/dev-db.sh up     # postgres://postgres:postgres@localhost:54329/app_dev
+```
+
+The `app_dev` sample connection points at it. All other sample connections still use the mock
+driver. The seed (`dev/postgres/init.sql`) covers the types and relation kinds the driver has to
+handle: uuid, jsonb, arrays, enums, inet, bytea, intervals, big NUMERICs, views, a materialized
+view, a partitioned table, a table without a primary key and an empty schema.
+`./scripts/dev-db.sh reset` recreates it from scratch.
+
+## Postgres driver
+
+- Values come back in Postgres' text format, so every type (extensions included) renders like psql.
+  Column types from `prepare` turn ints/floats/bools into typed values and NUMERIC into an exact
+  `Decimal` string.
+- Each connection opens two server sessions: one for browsing and one for scripts, so a long
+  script doesn't block browsing.
+- Table pages are ordered by primary key (or `ctid` if there's none). `total_count` is exact under
+  100k estimated rows and the planner estimate above that.
+- Scripts can hold several statements. You get the last result set, or the affected-row count if
+  no statement returned rows.
+- Cancellation: `Connection::cancel()` (Stop / ⌘. in the app) sends a Postgres cancel request.
+  Dropping an `execute` future does the same.
+- TLS follows libpq's `sslmode`: `prefer` (default) / `require` encrypt without verifying the
+  certificate, `verify-full` checks it against Mozilla's roots. Uses rustls with `ring`, so no
+  OpenSSL or cmake is needed.
+
 ## Run
 
 ```sh
-cargo test -p dbcore                               # core tests
+cargo test -p dbcore                               # core tests (Postgres tests skip themselves)
+./scripts/test-postgres.sh                         # + integration tests against the dev database
 ./scripts/build-core.sh                            # needed once before opening apps/macos in Xcode
-(cd apps/macos && swift test)                      # Swift ⇄ Rust bridge tests
+(cd apps/macos && swift test)                      # Swift ⇄ Rust bridge tests (DBGUI_TEST_POSTGRES=1 for real-db ones)
 ./scripts/bundle-mac.sh && open build/DBGui.app    # build + run the macOS app
 ```
 

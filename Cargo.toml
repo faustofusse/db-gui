@@ -14,6 +14,12 @@ tokio = { version = "1", default-features = false }
 async-trait = "0.1"
 thiserror = "2"
 regex = "1"
+tokio-postgres = { version = "0.7", default-features = false, features = ["runtime"] }
+tokio-postgres-rustls = "0.14"
+# ring backend: no cmake/NASM needed (aws-lc-rs would need them on Linux)
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging", "tls12"] }
+webpki-roots = "1"
+futures-util = { version = "0.3", default-features = false }
 
 [profile.release]
 lto = "thin"

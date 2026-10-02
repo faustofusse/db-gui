@@ -10,3 +10,8 @@ tokio = { workspace = true, features = ["rt-multi-thread", "time", "macros"] }
 async-trait.workspace = true
 thiserror.workspace = true
 regex.workspace = true
+tokio-postgres.workspace = true
+tokio-postgres-rustls.workspace = true
+rustls.workspace = true
+webpki-roots.workspace = true
+futures-util.workspace = true

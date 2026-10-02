@@ -12,6 +12,8 @@ pub enum Error {
     Unsupported(String),
     #[error("{0}")]
     Query(String),
+    #[error("Query cancelled")]
+    Cancelled,
     #[error("Internal error: {0}")]
     Internal(String),
 }
@@ -30,4 +32,6 @@ pub trait Driver: Send + Sync + 'static {
     async fn list_schemas(&self) -> Result<Vec<Schema>>;
     async fn fetch_rows(&self, table: &TableInfo, limit: u32, offset: u64) -> Result<QueryResult>;
     async fn execute(&self, sql: &str) -> Result<QueryResult>;
+    /// Cancels the running `execute`, if any. It then fails with [`Error::Cancelled`].
+    async fn cancel(&self) {}
 }

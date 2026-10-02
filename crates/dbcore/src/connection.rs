@@ -8,7 +8,9 @@ use tokio::task::JoinHandle;
 
 use crate::driver::{Driver, Error, Result};
 use crate::model::{ConnectionConfig, QueryResult, Schema, TableInfo};
-use crate::mock::MockDriver;
+use crate::mock::{self, MockDriver};
+use crate::model::DatabaseKind;
+use crate::postgres::PostgresDriver;
 
 /// The core owns its tokio runtime, so callers can await from any executor
 /// (Swift concurrency through FFI, GPUI's executor, or tokio itself).
@@ -49,9 +51,16 @@ where
     AbortOnDrop(runtime().spawn(future)).await?
 }
 
-/// Picks the driver for a connection. Everything is mocked for now.
+/// Picks the driver for a connection.
 fn make_driver(config: ConnectionConfig) -> Arc<dyn Driver> {
-    Arc::new(MockDriver::new(config))
+    if mock::is_mock(&config) {
+        return Arc::new(MockDriver::new(config));
+    }
+    match config.kind {
+        DatabaseKind::Postgres => Arc::new(PostgresDriver::new(config)),
+        // No real drivers yet: keep the UI usable with sample data.
+        DatabaseKind::Mysql | DatabaseKind::Sqlite => Arc::new(MockDriver::new(config)),
+    }
 }
 
 /// Entry point for frontends: one per configured connection. Cheap to clone.
@@ -93,8 +102,19 @@ impl Connection {
         on_runtime(async move { d.fetch_rows(&table, limit, offset).await }).await
     }
 
+    /// Dropping the returned future also cancels the query on the server.
     pub async fn execute(&self, sql: String) -> Result<QueryResult> {
         let d = self.driver.clone();
         on_runtime(async move { d.execute(&sql).await }).await
+    }
+
+    /// Cancels the running [`Connection::execute`], which then fails with [`Error::Cancelled`].
+    pub async fn cancel(&self) {
+        let d = self.driver.clone();
+        let _ = on_runtime(async move {
+            d.cancel().await;
+            Ok(())
+        })
+        .await;
     }
 }

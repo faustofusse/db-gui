@@ -43,6 +43,10 @@ final class RustDriver: DatabaseDriver {
         QueryResult(try await bridged { try await connection.execute(sql: sql) }, firstRowID: 0)
     }
 
+    func cancel() async {
+        await connection.cancel()
+    }
+
     /// Rethrows core errors as `DatabaseError`.
     private func bridged<T>(_ body: () async throws -> T) async throws -> T {
         do {
@@ -62,6 +66,7 @@ extension DatabaseError {
         case .TableNotFound(let name): self = .tableNotFound(name)
         case .Unsupported(let message): self = .unsupported(message)
         case .Query(let message): self = .query(message)
+        case .Cancelled: self = .cancelled
         case .Internal(let message): self = .internal(message)
         }
     }
@@ -87,11 +92,34 @@ extension DBCoreFFI.DatabaseKind {
     }
 }
 
+extension SslMode {
+    init(_ mode: DBCoreFFI.SslMode) {
+        switch mode {
+        case .disable: self = .disable
+        case .prefer: self = .prefer
+        case .require: self = .require
+        case .verifyFull: self = .verifyFull
+        }
+    }
+}
+
+extension DBCoreFFI.SslMode {
+    init(_ mode: SslMode) {
+        switch mode {
+        case .disable: self = .disable
+        case .prefer: self = .prefer
+        case .require: self = .require
+        case .verifyFull: self = .verifyFull
+        }
+    }
+}
+
 extension ConnectionConfig {
     init(_ c: DBCoreFFI.ConnectionConfig) {
         self.init(
             id: c.id, name: c.name, group: c.group, kind: DatabaseKind(c.kind),
             host: c.host, port: c.port.map(Int.init), database: c.database, user: c.user,
+            password: c.password, sslMode: SslMode(c.sslMode),
             summary: DBCoreFFI.connectionSummary(config: c)
         )
     }
@@ -101,7 +129,8 @@ extension DBCoreFFI.ConnectionConfig {
     init(_ c: ConnectionConfig) {
         self.init(
             id: c.id, name: c.name, group: c.group, kind: DBCoreFFI.DatabaseKind(c.kind),
-            host: c.host, port: c.port.map { UInt16(clamping: $0) }, database: c.database, user: c.user
+            host: c.host, port: c.port.map { UInt16(clamping: $0) }, database: c.database, user: c.user,
+            password: c.password, sslMode: DBCoreFFI.SslMode(c.sslMode)
         )
     }
 }
@@ -159,7 +188,8 @@ extension QueryResult {
         self.init(
             columns: r.columns.map(ColumnInfo.init),
             rows: r.rows.enumerated().map { Row(id: firstRowID + $0.offset, values: $0.element.map(DBValue.init)) },
-            totalCount: r.totalCount.map { Int(clamping: $0) }
+            totalCount: r.totalCount.map { Int(clamping: $0) },
+            rowsAffected: r.rowsAffected.map { Int(clamping: $0) }
         )
     }
 }

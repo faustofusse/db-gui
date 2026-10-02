@@ -13,6 +13,14 @@ use crate::model::*;
 /// Connections that simulate a failure (shows the warning state in the UI).
 pub const UNREACHABLE: &[&str] = &["prod-replica"];
 
+/// The sample connection backed by the real dev database (`scripts/dev-db.sh up`).
+pub const DEV_DATABASE: &str = "local-pg";
+
+/// Sample connections served by [`MockDriver`] (everything except the dev database).
+pub fn is_mock(config: &ConnectionConfig) -> bool {
+    config.id != DEV_DATABASE && connections().iter().any(|c| c.id == config.id)
+}
+
 pub fn connections() -> Vec<ConnectionConfig> {
     #[allow(clippy::too_many_arguments)]
     fn conn(
@@ -28,11 +36,16 @@ pub fn connections() -> Vec<ConnectionConfig> {
             port,
             database: db.into(),
             user: user.map(Into::into),
+            password: None,
+            ssl_mode: SslMode::default(),
         }
     }
     use DatabaseKind::*;
     vec![
-        conn("local-pg", "app_dev", "Local", Postgres, "localhost", Some(5432), "app_dev", Some("postgres")),
+        ConnectionConfig {
+            password: Some("postgres".into()),
+            ..conn(DEV_DATABASE, "app_dev", "Local", Postgres, "localhost", Some(54329), "app_dev", Some("postgres"))
+        },
         conn("local-mysql", "wordpress", "Local", Mysql, "localhost", Some(3306), "wordpress", Some("root")),
         conn("local-sqlite", "notes.db", "Local", Sqlite, "~/Library/Application Support/Notes", None, "notes.db", None),
         conn("staging-pg", "app_staging", "Staging", Postgres, "staging-db.internal", Some(5432), "app", Some("readonly")),
@@ -271,6 +284,7 @@ impl Driver for MockDriver {
             columns: spec.columns.clone(),
             rows: (offset..end.max(offset)).map(|i| spec.columns.iter().map(|c| value(c, i)).collect()).collect(),
             total_count: Some(spec.rows),
+            rows_affected: None,
         })
     }
 
@@ -322,7 +336,7 @@ impl Driver for MockDriver {
         Ok(QueryResult {
             columns: indices.iter().map(|&i| full.columns[i].clone()).collect(),
             rows: full.rows.iter().map(|r| indices.iter().map(|&i| r[i].clone()).collect()).collect(),
-            total_count: None,
+            ..Default::default()
         })
     }
 }
@@ -332,8 +346,9 @@ mod tests {
     use super::*;
     use crate::Connection;
 
+    /// Mock Postgres connection with the same sample schema the old app_dev mock had.
     fn app_dev() -> Connection {
-        Connection::new(connections()[0].clone())
+        Connection::new(connections().into_iter().find(|c| c.id == "staging-pg").unwrap())
     }
 
     // Plain #[test] + a throwaway executor proves Connection works outside tokio (as from Swift/GPUI).
@@ -384,9 +399,16 @@ mod tests {
     }
 
     #[test]
+    fn only_the_dev_database_is_real() {
+        let real: Vec<_> = connections().into_iter().filter(|c| !is_mock(c)).map(|c| c.id).collect();
+        assert_eq!(real, [DEV_DATABASE]);
+        assert!(format!("{:?}", connections()[0]).contains("password: Some(\"•••\")"));
+    }
+
+    #[test]
     fn summary_formats() {
         let c = &connections();
-        assert_eq!(c[0].summary(), "PostgreSQL · localhost:5432/app_dev");
+        assert_eq!(c[0].summary(), "PostgreSQL · localhost:54329/app_dev");
         assert_eq!(c[2].summary(), "SQLite · notes.db");
     }
 }

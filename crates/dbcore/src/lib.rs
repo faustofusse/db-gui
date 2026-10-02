@@ -8,6 +8,7 @@ mod connection;
 pub mod driver;
 pub mod mock;
 pub mod model;
+pub mod postgres;
 
 pub use connection::Connection;
 pub use driver::{Driver, Error, Result};

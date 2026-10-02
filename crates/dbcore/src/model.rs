@@ -17,7 +17,21 @@ impl DatabaseKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// TLS behaviour, named after libpq's `sslmode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum SslMode {
+    /// Plain TCP.
+    Disable,
+    /// TLS if the server supports it, without verifying its certificate.
+    #[default]
+    Prefer,
+    /// TLS required, certificate not verified (same as libpq).
+    Require,
+    /// TLS required, certificate chain and hostname verified.
+    VerifyFull,
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct ConnectionConfig {
     pub id: String,
     pub name: String,
@@ -27,6 +41,26 @@ pub struct ConnectionConfig {
     pub port: Option<u16>,
     pub database: String,
     pub user: Option<String>,
+    /// Supplied by the frontend from the platform keychain; never persisted by the core.
+    pub password: Option<String>,
+    pub ssl_mode: SslMode,
+}
+
+impl std::fmt::Debug for ConnectionConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConnectionConfig")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("group", &self.group)
+            .field("kind", &self.kind)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("database", &self.database)
+            .field("user", &self.user)
+            .field("password", &self.password.as_ref().map(|_| "•••"))
+            .field("ssl_mode", &self.ssl_mode)
+            .finish()
+    }
 }
 
 impl ConnectionConfig {
@@ -117,4 +151,6 @@ pub struct QueryResult {
     pub rows: Vec<Vec<Value>>,
     /// Total rows available (e.g. table size), when known.
     pub total_count: Option<u64>,
+    /// For statements that return no rows (INSERT/UPDATE/DDL…): rows affected, as reported by the server.
+    pub rows_affected: Option<u64>,
 }

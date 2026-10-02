@@ -14,6 +14,14 @@ public enum DatabaseKind: String, Sendable, Hashable, CaseIterable {
     }
 }
 
+/// TLS behaviour, named after libpq's `sslmode`.
+public enum SslMode: String, Sendable, Hashable, CaseIterable {
+    case disable
+    case prefer
+    case require
+    case verifyFull
+}
+
 public struct ConnectionConfig: Identifiable, Hashable, Sendable {
     public let id: String
     public var name: String
@@ -23,12 +31,16 @@ public struct ConnectionConfig: Identifiable, Hashable, Sendable {
     public var port: Int?
     public var database: String
     public var user: String?
+    /// Comes from the Keychain (later); passed to the core per connection.
+    public var password: String?
+    public var sslMode: SslMode
     /// e.g. "PostgreSQL · localhost:5432/app_dev" (formatted by the Rust core).
     public var summary: String
 
     public init(
         id: String, name: String, group: String, kind: DatabaseKind,
-        host: String, port: Int? = nil, database: String, user: String? = nil, summary: String = ""
+        host: String, port: Int? = nil, database: String, user: String? = nil,
+        password: String? = nil, sslMode: SslMode = .prefer, summary: String = ""
     ) {
         self.id = id
         self.name = name
@@ -38,6 +50,8 @@ public struct ConnectionConfig: Identifiable, Hashable, Sendable {
         self.port = port
         self.database = database
         self.user = user
+        self.password = password
+        self.sslMode = sslMode
         self.summary = summary
     }
 }
@@ -125,10 +139,13 @@ public struct QueryResult: Sendable {
     public var columns: [ColumnInfo]
     public var rows: [Row]
     public var totalCount: Int?
+    /// Set for statements that return no rows (INSERT/UPDATE/DDL…).
+    public var rowsAffected: Int?
 
-    public init(columns: [ColumnInfo], rows: [Row], totalCount: Int? = nil) {
+    public init(columns: [ColumnInfo], rows: [Row], totalCount: Int? = nil, rowsAffected: Int? = nil) {
         self.columns = columns
         self.rows = rows
         self.totalCount = totalCount
+        self.rowsAffected = rowsAffected
     }
 }

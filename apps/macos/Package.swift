@@ -16,7 +16,9 @@ let package = Package(
         .target(
             name: "DBCoreFFI",
             dependencies: ["DBCoreFFIBinary"],
-            swiftSettings: [.swiftLanguageMode(.v5)]
+            swiftSettings: [.swiftLanguageMode(.v5)],
+            // System frameworks the Rust static lib needs (tokio-postgres → whoami).
+            linkerSettings: [.linkedFramework("SystemConfiguration")]
         ),
         // Swift-facing models + DatabaseDriver protocol; adapts the generated API.
         .target(name: "DBKit", dependencies: ["DBCoreFFI"]),

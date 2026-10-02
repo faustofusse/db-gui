@@ -41,6 +41,8 @@ final class ScriptTab: Identifiable {
     var text: String
     var result: LoadState<QueryResult> = .idle
     var lastDuration: Duration?
+    /// The last run was stopped by the user.
+    var wasCancelled = false
     var search = ""
 
     init(connection: ConnectionConfig, title: String, text: String) {
@@ -293,15 +295,26 @@ final class AppModel {
     func run(_ tab: ScriptTab) async {
         guard !tab.result.isLoading else { return }
         tab.result = .loading
+        tab.wasCancelled = false
         let clock = ContinuousClock()
         let start = clock.now
         do {
             let result = try await driver(for: tab.connection).execute(tab.text)
             tab.lastDuration = clock.now - start
             tab.result = .loaded(result)
+        } catch DatabaseError.cancelled {
+            tab.lastDuration = clock.now - start
+            tab.result = .idle
+            tab.wasCancelled = true
         } catch {
             tab.lastDuration = clock.now - start
             tab.result = .failed(error.localizedDescription)
         }
+    }
+
+    /// Stops the script running in `tab` (server-side cancel).
+    func cancel(_ tab: ScriptTab) async {
+        guard tab.result.isLoading else { return }
+        await driver(for: tab.connection).cancel()
     }
 }

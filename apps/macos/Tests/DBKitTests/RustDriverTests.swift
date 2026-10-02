@@ -1,15 +1,45 @@
 import Testing
 @testable import DBKit
 
-// End-to-end through the FFI boundary: Swift → UniFFI → Rust core (mock driver).
-// Core behaviour itself is tested in Rust (`cargo test -p dbcore`).
+import Foundation
+
+// End-to-end through the FFI boundary: Swift → UniFFI → Rust core.
+// Core behaviour itself is tested in Rust (`cargo test -p dbcore`, `scripts/test-postgres.sh`).
 
 private let connections = Drivers.sampleConnections()
-private var appDev: ConnectionConfig { connections.first { $0.id == "local-pg" }! }
+/// Real dev database (scripts/dev-db.sh up).
+private var devDB: ConnectionConfig { connections.first { $0.id == "local-pg" }! }
+/// Mock Postgres with the sample schema.
+private var appDev: ConnectionConfig { connections.first { $0.id == "staging-pg" }! }
+private let postgresEnabled = ProcessInfo.processInfo.environment["DBGUI_TEST_POSTGRES"] == "1"
 
 @Test func loadsSampleConnectionsWithSummary() {
     #expect(connections.count == 6)
-    #expect(appDev.summary == "PostgreSQL · localhost:5432/app_dev")
+    #expect(devDB.summary == "PostgreSQL · localhost:54329/app_dev")
+    #expect(devDB.password == "postgres" && devDB.sslMode == .prefer)
+}
+
+@Test(.enabled(if: postgresEnabled)) func realPostgresRoundTrip() async throws {
+    let driver = Drivers.make(for: devDB)
+    let schemas = try await driver.listSchemas()
+    #expect(schemas.map(\.name) == ["analytics", "archive", "billing", "public"])
+
+    let affected = try await driver.execute("create temp table t (x int); insert into t values (1), (2)")
+    #expect(affected.columns.isEmpty && affected.rowsAffected == 2)
+}
+
+@Test(.enabled(if: postgresEnabled)) func cancelsRunningQuery() async throws {
+    let driver = Drivers.make(for: devDB)
+    try await driver.connect()
+    async let sleep = driver.execute("select pg_sleep(10)")
+    try await Task.sleep(for: .milliseconds(500))
+    await driver.cancel()
+    do {
+        _ = try await sleep
+        Issue.record("query should have been cancelled")
+    } catch DatabaseError.cancelled {
+        // expected
+    }
 }
 
 @Test func listsSchemas() async throws {

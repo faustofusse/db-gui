@@ -17,6 +17,14 @@ pub enum DatabaseKind {
     Sqlite,
 }
 
+#[derive(uniffi::Enum, Clone, Copy)]
+pub enum SslMode {
+    Disable,
+    Prefer,
+    Require,
+    VerifyFull,
+}
+
 #[derive(uniffi::Record, Clone)]
 pub struct ConnectionConfig {
     pub id: String,
@@ -27,6 +35,8 @@ pub struct ConnectionConfig {
     pub port: Option<u16>,
     pub database: String,
     pub user: Option<String>,
+    pub password: Option<String>,
+    pub ssl_mode: SslMode,
 }
 
 #[derive(uniffi::Enum, Clone, Copy)]
@@ -72,6 +82,7 @@ pub struct QueryResult {
     pub columns: Vec<ColumnInfo>,
     pub rows: Vec<Vec<Value>>,
     pub total_count: Option<u64>,
+    pub rows_affected: Option<u64>,
 }
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]
@@ -84,6 +95,8 @@ pub enum DbError {
     Unsupported { message: String },
     #[error("{message}")]
     Query { message: String },
+    #[error("Query cancelled")]
+    Cancelled,
     #[error("Internal error: {message}")]
     Internal { message: String },
 }
@@ -124,6 +137,12 @@ impl Connection {
 
     pub async fn execute(&self, sql: String) -> Result<QueryResult, DbError> {
         Ok(self.inner.execute(sql).await?.into())
+    }
+
+    /// Cancels the running `execute`, which then fails with `DbError::Cancelled`.
+    /// (Swift task cancellation doesn't reach Rust futures through UniFFI, so call this.)
+    pub async fn cancel(&self) {
+        self.inner.cancel().await
     }
 }
 
@@ -177,6 +196,8 @@ impl From<ConnectionConfig> for dbcore::ConnectionConfig {
             port: c.port,
             database: c.database,
             user: c.user,
+            password: c.password,
+            ssl_mode: c.ssl_mode.into(),
         }
     }
 }
@@ -192,6 +213,30 @@ impl From<dbcore::ConnectionConfig> for ConnectionConfig {
             port: c.port,
             database: c.database,
             user: c.user,
+            password: c.password,
+            ssl_mode: c.ssl_mode.into(),
+        }
+    }
+}
+
+impl From<SslMode> for dbcore::SslMode {
+    fn from(m: SslMode) -> Self {
+        match m {
+            SslMode::Disable => Self::Disable,
+            SslMode::Prefer => Self::Prefer,
+            SslMode::Require => Self::Require,
+            SslMode::VerifyFull => Self::VerifyFull,
+        }
+    }
+}
+
+impl From<dbcore::SslMode> for SslMode {
+    fn from(m: dbcore::SslMode) -> Self {
+        match m {
+            dbcore::SslMode::Disable => Self::Disable,
+            dbcore::SslMode::Prefer => Self::Prefer,
+            dbcore::SslMode::Require => Self::Require,
+            dbcore::SslMode::VerifyFull => Self::VerifyFull,
         }
     }
 }
@@ -257,6 +302,7 @@ impl From<dbcore::QueryResult> for QueryResult {
             columns: r.columns.into_iter().map(Into::into).collect(),
             rows: r.rows.into_iter().map(|row| row.into_iter().map(Into::into).collect()).collect(),
             total_count: r.total_count,
+            rows_affected: r.rows_affected,
         }
     }
 }
@@ -269,6 +315,7 @@ impl From<dbcore::Error> for DbError {
             E::TableNotFound(name) => Self::TableNotFound { name },
             E::Unsupported(message) => Self::Unsupported { message },
             E::Query(message) => Self::Query { message },
+            E::Cancelled => Self::Cancelled,
             E::Internal(message) => Self::Internal { message },
         }
     }

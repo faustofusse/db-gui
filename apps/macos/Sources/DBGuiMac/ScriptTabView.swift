@@ -34,15 +34,22 @@ struct ScriptTabView: View {
             Spacer()
             if tab.result.isLoading {
                 ProgressView().controlSize(.small)
+                Button {
+                    Task { await model.cancel(tab) }
+                } label: {
+                    Label("Stop", systemImage: "stop.fill")
+                }
+                .keyboardShortcut(".", modifiers: .command)
+                .help("Stop Script (⌘.)")
+            } else {
+                Button {
+                    Task { await model.run(tab) }
+                } label: {
+                    Label("Run", systemImage: "play.fill")
+                }
+                .keyboardShortcut(.return, modifiers: .command)
+                .help("Run Script (⌘↩)")
             }
-            Button {
-                Task { await model.run(tab) }
-            } label: {
-                Label("Run", systemImage: "play.fill")
-            }
-            .keyboardShortcut(.return, modifiers: .command)
-            .disabled(tab.result.isLoading)
-            .help("Run Script (⌘↩)")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
@@ -52,7 +59,7 @@ struct ScriptTabView: View {
     private var results: some View {
         switch tab.result {
         case .idle:
-            Text("Press ⌘↩ to run")
+            Text(tab.wasCancelled ? "Query cancelled" : "Press ⌘↩ to run")
                 .foregroundStyle(.tertiary)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         case .loading:
@@ -61,6 +68,18 @@ struct ScriptTabView: View {
         case .failed(let message):
             ContentUnavailableView("Query Failed", systemImage: "exclamationmark.triangle",
                                    description: Text(message).font(.system(.body, design: .monospaced)))
+        case .loaded(let result) where result.columns.isEmpty:
+            // INSERT/UPDATE/DDL: nothing to show in a grid.
+            VStack(spacing: 6) {
+                Text(result.rowsAffected.map { "\($0.formatted()) \($0 == 1 ? "row" : "rows") affected" } ?? "Done")
+                    .font(.title3)
+                if let duration = tab.lastDuration {
+                    Text(duration.formatted(.units(allowed: [.seconds, .milliseconds], width: .narrow)))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         case .loaded(let result):
             DataGrid(result: result, search: tab.search, duration: tab.lastDuration)
         }
