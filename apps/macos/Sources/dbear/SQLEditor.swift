@@ -7,15 +7,19 @@ struct SQLEditor: NSViewRepresentable {
     @Binding var text: String
     /// Make the editor first responder with the caret at the end once it's in a window.
     var focusOnAppear = false
+    var fontSize: CGFloat = NSFont.systemFontSize
+    /// ⌘= (the unshifted ⌘+ on US layouts) while the editor has focus; the menu handles ⌘+ and ⌘-.
+    var onZoomIn: () -> Void = {}
 
-    func makeCoordinator() -> Coordinator { Coordinator(text: $text) }
+    func makeCoordinator() -> Coordinator { Coordinator(text: $text, theme: SQLTheme(fontSize: fontSize)) }
 
     func makeNSView(context: Context) -> NSScrollView {
-        let scrollView = NSTextView.scrollableTextView()
+        let scrollView = SQLTextView.scrollableTextView()
         scrollView.drawsBackground = false
         scrollView.hasHorizontalScroller = false
 
-        let textView = scrollView.documentView as! NSTextView
+        let textView = scrollView.documentView as! SQLTextView
+        textView.onZoomIn = onZoomIn
         textView.delegate = context.coordinator
         textView.drawsBackground = false
         textView.isRichText = false
@@ -33,8 +37,9 @@ struct SQLEditor: NSViewRepresentable {
         textView.isAutomaticLinkDetectionEnabled = false
         textView.isAutomaticDataDetectionEnabled = false
         textView.textContainerInset = NSSize(width: 10, height: 8)
-        textView.font = SQLTheme.font
-        textView.typingAttributes = SQLTheme.baseAttributes
+        let theme = context.coordinator.theme
+        textView.font = theme.font
+        textView.typingAttributes = theme.baseAttributes
 
         textView.string = text
         context.coordinator.textView = textView
@@ -52,8 +57,17 @@ struct SQLEditor: NSViewRepresentable {
     }
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
-        context.coordinator.text = $text
-        guard let textView = context.coordinator.textView, textView.string != text else { return }
+        let coordinator = context.coordinator
+        coordinator.text = $text
+        guard let textView = coordinator.textView as? SQLTextView else { return }
+        textView.onZoomIn = onZoomIn
+        if coordinator.theme.fontSize != fontSize {
+            coordinator.theme = SQLTheme(fontSize: fontSize)
+            textView.font = coordinator.theme.font
+            textView.typingAttributes = coordinator.theme.baseAttributes
+            coordinator.highlight()
+        }
+        guard textView.string != text else { return }
         // External change (not typed here): replace and keep the caret in range.
         let caret = min(textView.selectedRange().location, (text as NSString).length)
         textView.string = text
@@ -64,10 +78,14 @@ struct SQLEditor: NSViewRepresentable {
     @MainActor
     final class Coordinator: NSObject, NSTextViewDelegate {
         var text: Binding<String>
+        var theme: SQLTheme
         weak var textView: NSTextView?
         private var generation = 0
 
-        init(text: Binding<String>) { self.text = text }
+        init(text: Binding<String>, theme: SQLTheme) {
+            self.text = text
+            self.theme = theme
+        }
 
         func textDidChange(_ notification: Notification) {
             guard let textView else { return }
@@ -99,38 +117,58 @@ struct SQLEditor: NSViewRepresentable {
             guard let storage = textView.textStorage else { return }
             let length = storage.length
             storage.beginEditing()
-            storage.setAttributes(SQLTheme.baseAttributes, range: NSRange(location: 0, length: length))
+            storage.setAttributes(theme.baseAttributes, range: NSRange(location: 0, length: length))
             for span in spans where NSMaxRange(span.range) <= length {
-                storage.addAttributes(SQLTheme.attributes(for: span.kind), range: span.range)
+                storage.addAttributes(theme.attributes(for: span.kind), range: span.range)
             }
             storage.endEditing()
         }
     }
 }
 
+final class SQLTextView: NSTextView {
+    var onZoomIn: () -> Void = {}
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if flags == .command, event.charactersIgnoringModifiers == "=" {
+            onZoomIn()
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+}
+
 /// Xcode-like palette (Default Light / Default Dark), resolved per appearance at draw time.
 @MainActor
-enum SQLTheme {
-    static let font = NSFont.monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
-    static let keywordFont = NSFont.monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .semibold)
+struct SQLTheme {
+    let fontSize: CGFloat
+    let font: NSFont
+    let baseAttributes: [NSAttributedString.Key: Any]
+    private let kinds: [SyntaxKind: [NSAttributedString.Key: Any]]
 
-    static let baseAttributes: [NSAttributedString.Key: Any] = [
-        .font: font,
-        .foregroundColor: NSColor.textColor,
-    ]
-
-    static func attributes(for kind: SyntaxKind) -> [NSAttributedString.Key: Any] {
-        cache[kind] ?? [:]
-    }
-
-    private static let cache: [SyntaxKind: [NSAttributedString.Key: Any]] = {
-        var result: [SyntaxKind: [NSAttributedString.Key: Any]] = [:]
+    init(fontSize: CGFloat) {
+        self.fontSize = fontSize
+        font = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
+        let keywordFont = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .semibold)
+        baseAttributes = [.font: font, .foregroundColor: NSColor.textColor]
+        var kinds: [SyntaxKind: [NSAttributedString.Key: Any]] = [:]
         for kind in SyntaxKind.allCases {
             var attrs: [NSAttributedString.Key: Any] = [:]
-            if let color = color(for: kind) { attrs[.foregroundColor] = color }
+            if let color = Self.colors[kind] { attrs[.foregroundColor] = color }
             if kind == .keyword || kind == .constant { attrs[.font] = keywordFont }
-            result[kind] = attrs
+            kinds[kind] = attrs
         }
+        self.kinds = kinds
+    }
+
+    func attributes(for kind: SyntaxKind) -> [NSAttributedString.Key: Any] {
+        kinds[kind] ?? [:]
+    }
+
+    private static let colors: [SyntaxKind: NSColor] = {
+        var result: [SyntaxKind: NSColor] = [:]
+        for kind in SyntaxKind.allCases { result[kind] = color(for: kind) }
         return result
     }()
 

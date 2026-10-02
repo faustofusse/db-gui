@@ -11,7 +11,12 @@ struct ScriptTabView: View {
         VerticalSplit(topHeight: $tab.editorHeight, minTop: 120, minBottom: 150) {
             VStack(spacing: 0) {
                 editorBar
-                SQLEditor(text: $tab.text, focusOnAppear: consumeInitialFocus())
+                SQLEditor(
+                    text: $tab.text,
+                    focusOnAppear: consumeInitialFocus(),
+                    fontSize: model.editorFontSize,
+                    onZoomIn: { model.zoomEditor(by: 1) }
+                )
             }
         } bottom: {
             results

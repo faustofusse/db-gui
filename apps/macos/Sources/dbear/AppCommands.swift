@@ -39,6 +39,20 @@ struct AppCommands: Commands {
                 .keyboardShortcut("f", modifiers: .command)
         }
 
+        // View menu. Only the SQL editor zooms; the rest of the UI keeps the system size.
+        CommandGroup(after: .toolbar) {
+            Button("Actual Size") { model.resetEditorZoom() }
+                .keyboardShortcut("0", modifiers: .command)
+                .disabled(!model.isScriptActive || model.editorFontSize == AppModel.defaultEditorFontSize)
+            Button("Zoom In") { model.zoomEditor(by: 1) }
+                .keyboardShortcut("+", modifiers: .command)
+                .disabled(!model.isScriptActive || model.editorFontSize >= AppModel.editorFontSizes.upperBound)
+            Button("Zoom Out") { model.zoomEditor(by: -1) }
+                .keyboardShortcut("-", modifiers: .command)
+                .disabled(!model.isScriptActive || model.editorFontSize <= AppModel.editorFontSizes.lowerBound)
+            Divider()
+        }
+
         CommandGroup(before: .windowList) {
             Button("Show Previous Tab") { model.selectAdjacentTab(offset: -1) }
                 .keyboardShortcut("[", modifiers: [.command, .shift])

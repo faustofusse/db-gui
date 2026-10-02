@@ -1,3 +1,4 @@
+import AppKit
 import DBKit
 import Foundation
 import Observation
@@ -167,8 +168,31 @@ final class AppModel {
     /// Incremented by ⌘F to focus the toolbar search field.
     var searchFocusRequest = 0
 
+    /// SQL editor text size (⌘+ / ⌘- / ⌘0). Shared by all script tabs and remembered across launches.
+    var editorFontSize: CGFloat = AppModel.storedEditorFontSize {
+        didSet { UserDefaults.standard.set(Double(editorFontSize), forKey: Self.editorFontSizeKey) }
+    }
+    static let defaultEditorFontSize = NSFont.systemFontSize
+    static let editorFontSizes: ClosedRange<CGFloat> = 8...40
+
     private var drivers: [ConnectionConfig.ID: any DatabaseDriver] = [:]
     private var scriptCounter = 0
+
+    private static let editorFontSizeKey = "editorFontSize"
+    private static var storedEditorFontSize: CGFloat {
+        let stored = UserDefaults.standard.double(forKey: editorFontSizeKey)
+        return stored > 0 ? min(max(CGFloat(stored), editorFontSizes.lowerBound), editorFontSizes.upperBound) : defaultEditorFontSize
+    }
+
+    var isScriptActive: Bool {
+        if case .script = activeTab { true } else { false }
+    }
+
+    func zoomEditor(by step: CGFloat) {
+        editorFontSize = min(max(editorFontSize + step, Self.editorFontSizes.lowerBound), Self.editorFontSizes.upperBound)
+    }
+
+    func resetEditorZoom() { editorFontSize = Self.defaultEditorFontSize }
 
     // MARK: Derived
 
@@ -440,12 +464,7 @@ final class AppModel {
     func newScript() {
         guard let connection = selectedConnection else { return }
         scriptCounter += 1
-        let example = schemas.value?.first?.tables.first.map { "select * from \($0.schema).\($0.name) limit 50;" } ?? ""
-        let tab = ScriptTab(
-            connection: connection,
-            title: "Script \(scriptCounter)",
-            text: "-- \(connection.name)\n\(example)\n"
-        )
+        let tab = ScriptTab(connection: connection, title: "Script \(scriptCounter)", text: "")
         insertAfterActive(.script(tab))
         activeTabID = tab.id
     }
