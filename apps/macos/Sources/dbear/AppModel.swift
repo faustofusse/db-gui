@@ -273,17 +273,25 @@ final class AppModel {
         }
     }
     var selectedConnectionID: ConnectionConfig.ID? {
-        // Show a spinner, not the previous connection's tables, until the new ones load.
+        // Show the new connection's cached tables, or a spinner (never the previous connection's).
         didSet {
             guard selectedConnectionID != oldValue else { return }
-            selectedDatabase = nil
-            schemas = .loading
+            selectedDatabase = selectedConnectionID.flatMap { lastDatabase[$0] }
+            showCachedSchemas()
         }
     }
     /// Database shown for the selected connection; `nil` means the connection's own `database`.
     var selectedDatabase: String? {
-        didSet { if selectedDatabase != oldValue { schemas = .loading } }
+        didSet {
+            if let id = selectedConnectionID { lastDatabase[id] = selectedDatabase }
+            if selectedDatabase != oldValue { showCachedSchemas() }
+        }
     }
+    /// The database last shown for each connection, restored when it's selected again.
+    private var lastDatabase: [ConnectionConfig.ID: String] = [:]
+    /// Schemas already listed per database, so switching back and forth doesn't reload them.
+    /// Dropped by Refresh, (re)connecting, disconnecting, and scripts that change the schema.
+    private var schemaCache: [DriverKey: [Schema]] = [:]
     /// Databases on each connection's server, once listed (only for "show all databases" connections).
     var databaseLists: [ConnectionConfig.ID: [String]] = [:]
 
@@ -357,11 +365,12 @@ final class AppModel {
         return connection.withDatabase(db)
     }
 
-    /// Selects a connection and one of its databases (`nil` = its default database).
+    /// Selects a connection and one of its databases (`nil` = the one it showed last, else its default).
     func select(_ connectionID: ConnectionConfig.ID?, database: String? = nil) {
         selectedConnectionID = connectionID
+        guard let database else { return }
         let connection = connections.first { $0.id == connectionID }
-        let isDefault = database == nil || database == connection?.database || database == connection?.defaultDatabase
+        let isDefault = database == connection?.database || database == connection?.defaultDatabase
         selectedDatabase = isDefault ? nil : database
     }
 
@@ -469,7 +478,7 @@ final class AppModel {
         } else if let previous, previous.showAllDatabases != saved.showAllDatabases {
             databaseLists[saved.id] = nil
             if saved.id == selectedConnectionID {
-                if saved.showAllDatabases { Task { await loadDatabases(saved) } } else { select(saved.id) }
+                if saved.showAllDatabases { Task { await loadDatabases(saved) } } else { select(saved.id, database: saved.database) }
             }
         }
         connections = store.connections()
@@ -527,6 +536,8 @@ final class AppModel {
             if let driver = drivers.removeValue(forKey: key) { Task { await driver.disconnect() } }
         }
         databaseLists[id] = nil
+        lastDatabase[id] = nil
+        forgetSchemas(of: id)
         openConnections.remove(id)
         invalidateCompletionCatalogs(of: id)
         tabs.filter { $0.connection.id == id }.forEach { close($0.id) }
@@ -564,7 +575,9 @@ final class AppModel {
         for driver in open { await driver.disconnect() }
         tabs.filter { $0.connection.id == config.id }.forEach { close($0.id) }
         databaseLists[config.id] = nil
+        forgetSchemas(of: config.id)
         invalidateCompletionCatalogs(of: config.id)
+        lastDatabase[config.id] = nil
         if config.id == selectedConnectionID {
             select(nil)
             schemas = .idle
@@ -591,9 +604,15 @@ final class AppModel {
 
     // MARK: Schemas
 
-    func loadSchemas() async {
+    /// Lists the selected database's schemas. Uses the cached list unless `refresh`.
+    func loadSchemas(refresh: Bool = false) async {
         guard let connection = selectedConnection, let target = selectedTarget else { schemas = .idle; return }
+        if !refresh, let cached = schemaCache[target.driverKey] {
+            schemas = .loaded(cached)
+            return
+        }
         schemas = .loading
+        schemaCache[target.driverKey] = nil
         invalidateCompletionCatalog(for: target)
         // No database configured (MySQL; Postgres falls back to `postgres`): open the server's
         // first one, as if picked from the title menu, rather than listing every database at once.
@@ -613,6 +632,7 @@ final class AppModel {
             let result = try await driver(for: target).listSchemas()
             guard target.driverKey == selectedTarget?.driverKey else { return }
             if isDefault { failedConnections.remove(connection.id) }
+            schemaCache[target.driverKey] = result
             schemas = .loaded(result)
         } catch {
             guard target.driverKey == selectedTarget?.driverKey else { return }
@@ -621,6 +641,30 @@ final class AppModel {
         }
         await updateConnectionState(connection.id)
     }
+
+    private func showCachedSchemas() {
+        schemas = selectedTarget.flatMap { schemaCache[$0.driverKey] }.map { .loaded($0) } ?? .loading
+    }
+
+    private func forgetSchemas(of id: ConnectionConfig.ID) {
+        schemaCache = schemaCache.filter { $0.key.connectionID != id }
+    }
+
+    /// After a script that may have created, dropped or renamed tables: forget that database's
+    /// cached schemas and, if it's on screen, reload them in place (no spinner).
+    private func schemaMayHaveChanged(_ target: ConnectionConfig) async {
+        let key = target.driverKey
+        schemaCache[key] = nil
+        invalidateCompletionCatalog(for: target)
+        guard key == selectedTarget?.driverKey,
+              let result = try? await driver(for: target).listSchemas(),
+              key == selectedTarget?.driverKey else { return }
+        schemaCache[key] = result
+        schemas = .loaded(result)
+    }
+
+    /// Statements that can add, remove or rename tables, views or schemas.
+    private static let ddl = /(?i)\b(create|drop|alter|rename)\b/
 
     /// Lists the server's databases for the tables column's database menu.
     func loadDatabases(_ connection: ConnectionConfig) async {
@@ -1046,9 +1090,11 @@ final class AppModel {
         let clock = ContinuousClock()
         let start = clock.now
         do {
-            let result = try await driver(for: tab.connection).execute(tab.sqlToRun, maxRows: scriptRowLimit)
+            let sql = tab.sqlToRun
+            let result = try await driver(for: tab.connection).execute(sql, maxRows: scriptRowLimit)
             tab.lastDuration = clock.now - start
             tab.result = .loaded(result)
+            if sql.contains(Self.ddl) { await schemaMayHaveChanged(tab.connection) }
         } catch DatabaseError.cancelled {
             tab.lastDuration = clock.now - start
             tab.result = .idle

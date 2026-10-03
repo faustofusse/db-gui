@@ -4,7 +4,12 @@ import SwiftUI
 struct TablesList: View {
     @Environment(AppModel.self) private var model
     @State private var tablesOnly = false
-    @State private var collapsed: Set<String> = []
+    /// Folded schema sections, remembered per database so switching connections keeps them.
+    @State private var collapsedByTarget: [DriverKey: Set<String>] = [:]
+    private var collapsed: Set<String> {
+        get { model.selectedTarget.flatMap { collapsedByTarget[$0.driverKey] } ?? [] }
+        nonmutating set { if let key = model.selectedTarget?.driverKey { collapsedByTarget[key] = newValue } }
+    }
     @FocusState private var focused: Bool
     /// The column's width, to size the database title menu like the native title.
     @State private var width: CGFloat = 300
@@ -39,7 +44,7 @@ struct TablesList: View {
                     .help(tablesOnly ? "Showing tables only" : "Filter: tables only")
 
                     Menu {
-                        Button("Refresh") { Task { await model.loadSchemas() } }
+                        Button("Refresh") { Task { await model.loadSchemas(refresh: true) } }
                         // A single MySQL database has no sections to fold.
                         if singleDatabase(in: model.schemas.value ?? []) == nil {
                             Divider()
@@ -55,7 +60,6 @@ struct TablesList: View {
                 }
             }
             .task(id: model.selectedTarget?.driverKey) {
-                collapsed = []
                 await model.loadSchemas()
             }
     }
@@ -144,7 +148,7 @@ struct TablesList: View {
                 } description: {
                     Text(message)
                 } actions: {
-                    Button("Try Again") { Task { await model.loadSchemas() } }
+                    Button("Try Again") { Task { await model.loadSchemas(refresh: true) } }
                 }
             case .loaded(let schemas):
                 ScrollViewReader { proxy in
