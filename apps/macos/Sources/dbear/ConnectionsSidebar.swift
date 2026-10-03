@@ -11,19 +11,9 @@ struct ConnectionsSidebar: View {
         List {
             ForEach(model.groupedConnections, id: \.group) { group in
                 Section(isExpanded: expansion(for: group.group)) {
+                    // Databases of a connection are picked from the tables column's title menu.
                     ForEach(group.connections) { connection in
-                        if let databases = model.databases(of: connection) {
-                            // Mail's "All Inboxes": the connection expands to its databases.
-                            DisclosureGroup(isExpanded: databasesExpanded(connection)) {
-                                ForEach(databases, id: \.self) { database in
-                                    databaseRow(database, of: connection)
-                                }
-                            } label: {
-                                connectionRow(connection)
-                            }
-                        } else {
-                            connectionRow(connection)
-                        }
+                        connectionRow(connection)
                     }
                 } header: {
                     Text(group.group.isEmpty ? "Connections" : group.group)
@@ -31,7 +21,7 @@ struct ConnectionsSidebar: View {
             }
         }
         .listStyle(.sidebar)
-        .arrowKeySelection(ids: visibleItems, selected: model.selectedSidebarItem, focus: $focused) {
+        .arrowKeySelection(ids: visibleConnections, selected: model.selectedConnectionID, focus: $focused) {
             model.select($0)
         }
         .onDeleteCommand {
@@ -77,41 +67,12 @@ struct ConnectionsSidebar: View {
             isOpen: model.openConnections.contains(connection.id),
             failed: model.failedConnections.contains(connection.id)
         )
-        .mailSelection(model.selectedSidebarItem == SidebarItem(connectionID: connection.id, database: nil)) {
-            model.select(connection.id)
+        .mailSelection(model.selectedConnectionID == connection.id) {
+            // Clicking the selected connection again keeps the database picked for it.
+            if model.selectedConnectionID != connection.id { model.select(connection.id) }
             focused = true
         }
         .contextMenu { menu(for: connection) }
-    }
-
-    private func databaseRow(_ database: String, of connection: ConnectionConfig) -> some View {
-        let item = SidebarItem(connectionID: connection.id, database: database)
-        return Label(database, systemImage: "cylinder")
-            .lineLimit(1)
-            .help(database == connection.defaultDatabase ? "\(database) (default)" : database)
-            .mailSelection(model.selectedSidebarItem == item) {
-                model.select(item)
-                focused = true
-            }
-            .contextMenu {
-                Button("New SQL Script") {
-                    model.select(item)
-                    model.newScript()
-                }
-            }
-    }
-
-    private func databasesExpanded(_ connection: ConnectionConfig) -> Binding<Bool> {
-        Binding(
-            get: { model.expandedConnections.contains(connection.id) },
-            set: { expanded in
-                if expanded {
-                    model.expandedConnections.insert(connection.id)
-                } else {
-                    model.expandedConnections.remove(connection.id)
-                }
-            }
-        )
     }
 
     @ViewBuilder
@@ -139,16 +100,11 @@ struct ConnectionsSidebar: View {
         Button("Delete…", role: .destructive) { model.pendingDeletion = connection }
     }
 
-    private var visibleItems: [SidebarItem] {
+    private var visibleConnections: [ConnectionConfig.ID] {
         model.groupedConnections
             .filter { !collapsed.contains($0.group) }
             .flatMap(\.connections)
-            .flatMap { connection -> [SidebarItem] in
-                let row = SidebarItem(connectionID: connection.id, database: nil)
-                guard let databases = model.databases(of: connection),
-                      model.expandedConnections.contains(connection.id) else { return [row] }
-                return [row] + databases.map { SidebarItem(connectionID: connection.id, database: $0) }
-            }
+            .map(\.id)
     }
 
     private func expansion(for group: String) -> Binding<Bool> {

@@ -6,12 +6,32 @@ struct TablesList: View {
     @State private var tablesOnly = false
     @State private var collapsed: Set<String> = []
     @FocusState private var focused: Bool
+    /// The column's width, to size the database title menu like the native title.
+    @State private var width: CGFloat = 300
 
     var body: some View {
         content
-            .navigationTitle(model.selectedTarget.map { model.displayName(of: $0) } ?? "Tables")
+            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
+            .navigationTitle(title)
             .navigationSubtitle(subtitle)
+            // With several databases the title becomes a menu (`toolbarTitleMenu` shows no indicator
+            // on macOS, so nobody would find it): same title and subtitle, plus a visible ▾.
+            .toolbar(removing: hasDatabaseMenu ? .title : nil)
             .toolbar {
+                if hasDatabaseMenu {
+                    ToolbarItem(placement: .navigation) {
+                        DatabaseTitle(
+                            title: title, subtitle: subtitle, help: model.selectedTarget?.summary,
+                            // What the filter and ••• buttons leave free, as the native title gets.
+                            maxWidth: max(80, width - 110)
+                        ) { databaseMenu }
+                    }
+                    .sharedBackgroundIfAvailable(hidden: true)
+                    // Like the native title, take the free space so the buttons stay at the trailing edge.
+                    if #available(macOS 26.0, *) {
+                        ToolbarSpacer(.flexible)
+                    }
+                }
                 ToolbarItemGroup {
                     Toggle(isOn: $tablesOnly) {
                         Label("Filter", systemImage: "line.3.horizontal.decrease")
@@ -37,9 +57,42 @@ struct TablesList: View {
             }
     }
 
+    /// The database when the title is a database menu, else the connection's name.
+    private var title: String {
+        guard let target = model.selectedTarget else { return "Tables" }
+        if let connection = model.selectedConnection, model.databases(of: connection) != nil {
+            return target.defaultDatabase
+        }
+        return model.displayName(of: target)
+    }
+
+    private var hasDatabaseMenu: Bool {
+        model.selectedConnection.flatMap { model.databases(of: $0) } != nil
+    }
+
+    /// Title menu of a connection that lists its server's databases: pick the one to browse.
+    @ViewBuilder
+    private var databaseMenu: some View {
+        if let connection = model.selectedConnection, let databases = model.databases(of: connection) {
+            Picker("Database", selection: Binding(
+                get: { model.selectedTarget?.defaultDatabase ?? connection.defaultDatabase },
+                set: { model.select(connection.id, database: $0) }
+            )) {
+                ForEach(databases, id: \.self) { database in
+                    Text(database == connection.defaultDatabase ? "\(database) (default)" : database).tag(database)
+                }
+            }
+            .pickerStyle(.inline)
+            .labelsHidden()
+            Divider()
+            Button("Refresh Databases") { Task { await model.loadDatabases(connection) } }
+        }
+    }
+
     private var subtitle: String {
         guard let schemas = model.schemas.value else {
-            return model.selectedTarget?.summary ?? ""
+            // Not the connection summary: host names are long, and the title jumped while loading.
+            return model.schemas.isLoading ? "Loading…" : model.selectedTarget?.summary ?? ""
         }
         if tablesOnly { return "Filter by: Tables only" }
         let tables = schemas.reduce(0) { $0 + $1.tables.count }
@@ -143,5 +196,59 @@ private struct TableRow: View {
             Image(systemName: table.kind == .view ? "eye" : "tablecells")
         }
         .help("\(table.kind == .view ? "View" : "Table") \(table.id)")
+    }
+}
+
+/// Looks like the column's native title and subtitle, with a ▾ that opens `menu`.
+private struct DatabaseTitle<Items: View>: View {
+    let title: String
+    let subtitle: String
+    let help: String?
+    let maxWidth: CGFloat
+    @ViewBuilder let menu: Items
+    @Environment(\.controlActiveState) private var activeState
+
+    var body: some View {
+        // Native titles dim when the window isn't key.
+        let inactive = activeState == .inactive
+        Menu {
+            menu
+        } label: {
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 4) {
+                    Text(title)
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(inactive ? .tertiary : .primary)
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.secondary)
+                }
+                Text(subtitle)
+                    .font(.system(size: 11))
+                    .foregroundStyle(inactive ? .tertiary : .secondary)
+            }
+            // Where the native title starts.
+            .padding(.leading, 12)
+            .lineLimit(1)
+            .contentShape(Rectangle())
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        // Truncates like the native title instead of growing with long names (it pushed the
+        // column's buttons around); the full connection summary is in the tooltip.
+        .frame(maxWidth: maxWidth, alignment: .leading)
+        .help(help.map { "\($0)\nClick to switch database" } ?? "Click to switch database")
+    }
+}
+
+private extension ToolbarContent {
+    /// No Liquid Glass capsule behind the title, so it reads like the plain native title.
+    func sharedBackgroundIfAvailable(hidden: Bool) -> some ToolbarContent {
+        if #available(macOS 26.0, *) {
+            return sharedBackgroundVisibility(hidden ? .hidden : .automatic)
+        } else {
+            return self
+        }
     }
 }

@@ -239,13 +239,6 @@ struct DriverKey: Hashable {
     let database: String
 }
 
-/// A row in the connections sidebar: the connection itself, or one of its databases.
-struct SidebarItem: Hashable {
-    let connectionID: ConnectionConfig.ID
-    /// `nil` for the connection row.
-    let database: String?
-}
-
 @Observable
 @MainActor
 final class AppModel {
@@ -289,8 +282,6 @@ final class AppModel {
     }
     /// Databases on each connection's server, once listed (only for "show all databases" connections).
     var databaseLists: [ConnectionConfig.ID: [String]] = [:]
-    /// Connections whose databases are expanded in the sidebar.
-    var expandedConnections: Set<ConnectionConfig.ID> = []
 
     var schemas: LoadState<[Schema]> = .idle
     /// Connections whose last attempt failed (shows a warning in the sidebar).
@@ -372,24 +363,11 @@ final class AppModel {
         selectedDatabase = isDefault ? nil : database
     }
 
-    func select(_ item: SidebarItem) {
-        select(item.connectionID, database: item.database)
-    }
-
-    /// Databases to list under a connection in the sidebar (nil when there's nothing to choose).
+    /// Databases offered in the tables column's title menu (nil when there's nothing to choose).
     func databases(of connection: ConnectionConfig) -> [String]? {
         guard connection.showAllDatabases, connection.supportsMultipleDatabases,
               let list = databaseLists[connection.id], list.count > 1 else { return nil }
         return list
-    }
-
-    /// The highlighted sidebar row: a database row when the connection is expanded, else the connection.
-    var selectedSidebarItem: SidebarItem? {
-        guard let connection = selectedConnection else { return nil }
-        guard databases(of: connection) != nil, expandedConnections.contains(connection.id) else {
-            return SidebarItem(connectionID: connection.id, database: nil)
-        }
-        return SidebarItem(connectionID: connection.id, database: selectedDatabase ?? connection.defaultDatabase)
     }
 
     /// "name" for a connection's own database, "name · other_db" for the rest.
@@ -584,7 +562,6 @@ final class AppModel {
         for driver in open { await driver.disconnect() }
         tabs.filter { $0.connection.id == config.id }.forEach { close($0.id) }
         databaseLists[config.id] = nil
-        expandedConnections.remove(config.id)
         invalidateCompletionCatalogs(of: config.id)
         if config.id == selectedConnectionID {
             select(nil)
@@ -634,15 +611,11 @@ final class AppModel {
         await updateConnectionState(connection.id)
     }
 
-    /// Lists the server's databases for the sidebar. The first time there's more than one,
-    /// the connection expands so they're discoverable.
+    /// Lists the server's databases for the tables column's database menu.
     func loadDatabases(_ connection: ConnectionConfig) async {
         guard connection.showAllDatabases, connection.supportsMultipleDatabases else { return }
         do {
-            let list = try await driver(for: connection).listDatabases()
-            let firstTime = databaseLists[connection.id] == nil
-            databaseLists[connection.id] = list
-            if firstTime, list.count > 1 { expandedConnections.insert(connection.id) }
+            databaseLists[connection.id] = try await driver(for: connection).listDatabases()
         } catch {
             // Not fatal: the connection still works with its own database.
         }
