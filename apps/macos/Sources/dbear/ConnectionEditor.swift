@@ -64,8 +64,7 @@ struct ConnectionEditor: View {
 
     private var header: some View {
         HStack(spacing: 12) {
-            Image(systemName: draft.kind.symbolName)
-                .font(.system(size: 22, weight: .regular))
+            DatabaseKindIcon(kind: draft.kind, size: 24)
                 .foregroundStyle(.white)
                 .frame(width: 40, height: 40)
                 .background(.tint, in: RoundedRectangle(cornerRadius: 9, style: .continuous))

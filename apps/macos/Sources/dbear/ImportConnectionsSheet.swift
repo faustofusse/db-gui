@@ -183,9 +183,9 @@ private struct ImportRow: View {
     var body: some View {
         Toggle(isOn: $isOn) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Image(systemName: item.config.kind.symbolName)
+                DatabaseKindIcon(kind: item.config.kind, size: 14)
                     .foregroundStyle(.secondary)
-                    .frame(width: 16)
+                    .alignmentGuide(.firstTextBaseline) { $0[.bottom] - 2 }
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 6) {
                         Text(item.config.name)

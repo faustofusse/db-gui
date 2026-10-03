@@ -38,7 +38,11 @@ struct ScriptTabView: View {
 
     private var editorBar: some View {
         HStack(spacing: 8) {
-            Label(model.displayName(of: tab.connection), systemImage: tab.connection.kind.symbolName)
+            Label {
+                Text(model.displayName(of: tab.connection))
+            } icon: {
+                DatabaseKindIcon(kind: tab.connection.kind, size: 13)
+            }
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .help(tab.connection.summary)

@@ -140,20 +140,10 @@ private struct ConnectionRow: View {
                 }
             }
         } icon: {
-            Image(systemName: connection.kind.symbolName)
+            DatabaseKindIcon(kind: connection.kind)
         }
         .help(connection.summary)
         .accessibilityValue(failed ? "Connection failed" : isOpen ? "Connected" : "Not connected")
-    }
-}
-
-extension DatabaseKind {
-    var symbolName: String {
-        switch self {
-        case .postgres: "cylinder.split.1x2"
-        case .mysql: "cylinder"
-        case .sqlite: "doc"
-        }
     }
 }
 
