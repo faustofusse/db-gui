@@ -294,6 +294,10 @@ final class AppModel {
     private var schemaCache: [DriverKey: [Schema]] = [:]
     /// Databases on each connection's server, once listed (only for "show all databases" connections).
     var databaseLists: [ConnectionConfig.ID: [String]] = [:]
+    /// Connection whose database menu (tables column title) should pop open by itself: it has no
+    /// database, so Postgres fell back to `postgres` on a server with others to choose from.
+    /// Cleared by the menu once shown.
+    var databaseMenuRequest: ConnectionConfig.ID?
 
     var schemas: LoadState<[Schema]> = .idle
     /// Connections whose last attempt failed (shows a warning in the sidebar).
@@ -669,8 +673,16 @@ final class AppModel {
     /// Lists the server's databases for the tables column's database menu.
     func loadDatabases(_ connection: ConnectionConfig) async {
         guard connection.showAllDatabases, connection.supportsMultipleDatabases else { return }
+        let firstLoad = databaseLists[connection.id] == nil
         do {
-            databaseLists[connection.id] = try await driver(for: connection).listDatabases()
+            let list = try await driver(for: connection).listDatabases()
+            databaseLists[connection.id] = list
+            // No database configured and the server fell back to its default (Postgres): offer the
+            // others right away instead of silently browsing `postgres`.
+            if firstLoad, list.count > 1, connection.database.isEmpty, !connection.defaultDatabase.isEmpty,
+               connection.id == selectedConnectionID, selectedDatabase == nil {
+                databaseMenuRequest = connection.id
+            }
         } catch {
             // Not fatal: the connection still works with its own database.
         }
