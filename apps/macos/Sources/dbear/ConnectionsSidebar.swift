@@ -132,18 +132,52 @@ private struct ConnectionRow: View {
                         .foregroundStyle(.secondary)
                         .help("Could not connect")
                 } else if isOpen {
-                    Circle()
-                        .fill(.green)
-                        .frame(width: 7, height: 7)
-                        .padding(.trailing, 4)
+                    ConnectedIndicator()
+                        .padding(.trailing, 2)
                         .help("Connected")
+                        .transition(.scale.combined(with: .opacity))
                 }
             }
         } icon: {
             DatabaseKindIcon(kind: connection.kind)
         }
         .help(connection.summary)
+        .animation(.spring(duration: 0.3), value: isOpen)
         .accessibilityValue(failed ? "Connection failed" : isOpen ? "Connected" : "Not connected")
+    }
+}
+
+/// Status light for an open connection: a lit dot with a soft halo that
+/// sends out a single ripple when it first appears.
+private struct ConnectedIndicator: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var rippling = false
+
+    private let tint = Color(nsColor: .systemGreen)
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .fill(tint.opacity(0.18))
+                .frame(width: 13, height: 13)
+
+            Circle()
+                .stroke(tint.opacity(rippling ? 0 : 0.6), lineWidth: 1)
+                .frame(width: 7, height: 7)
+                .scaleEffect(rippling ? 2.4 : 1)
+
+            Circle()
+                .fill(tint.gradient)
+                .overlay(Circle().strokeBorder(.white.opacity(0.25), lineWidth: 0.5))
+                .frame(width: 7, height: 7)
+                .shadow(color: tint.opacity(0.7), radius: 2.5)
+        }
+        .frame(width: 14, height: 14)
+        .onAppear {
+            guard !reduceMotion else { return }
+            withAnimation(.easeOut(duration: 1.1)) { rippling = true }
+        }
+        .accessibilityHidden(true)
     }
 }
 
