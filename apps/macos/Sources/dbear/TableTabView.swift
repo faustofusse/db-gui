@@ -10,12 +10,7 @@ struct TableTabView: View {
     var body: some View {
         switch tab.mode {
         case .data:
-            VStack(spacing: 0) {
-                if !tab.edits.isEmpty {
-                    PendingChangesBar(tab: tab)
-                }
-                rows.frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
+            rows.frame(maxWidth: .infinity, maxHeight: .infinity)
             .sheet(isPresented: Binding(get: { tab.isReviewingEdits }, set: { tab.isReviewingEdits = $0 })) {
                 ReviewChangesSheet(tab: tab)
             }
@@ -126,28 +121,26 @@ private struct RowButtons: View {
     }
 }
 
-/// Shown while a tab has unsaved edits: what changed, Discard, and Save (⌘S → review).
-private struct PendingChangesBar: View {
+/// Toolbar buttons shown while a tab has unsaved edits: Discard, and what changed (click → review, ⌘S).
+struct PendingChangesButtons: View {
     @Environment(AppModel.self) private var model
     let tab: TableTab
 
     var body: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "pencil.circle.fill").foregroundStyle(.orange)
-            Text(tab.edits.summary).monospacedDigit()
-            Text("Not saved yet").foregroundStyle(.secondary)
-            Spacer()
-            Button("Discard") { model.discardEdits(tab) }
-            Button("Review & Save…") { model.reviewEdits(tab) }
-                .buttonStyle(.borderedProminent)
-                .help("Review the SQL, then save in one transaction (⌘S)")
+        Button { model.discardEdits(tab) } label: {
+            Label("Discard", systemImage: "arrow.uturn.backward")
         }
-        .controlSize(.small)
-        .font(.callout)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-        .background(Color.orange.opacity(0.08))
-        .overlay(alignment: .bottom) { Divider() }
+        .help("Discard unsaved changes")
+
+        Button { model.reviewEdits(tab) } label: {
+            Label {
+                Text(tab.edits.summary).monospacedDigit()
+            } icon: {
+                Image(systemName: "pencil.circle.fill").foregroundStyle(.orange)
+            }
+            .labelStyle(.titleAndIcon)
+        }
+        .help("Not saved yet. Review the SQL, then save in one transaction (⌘S)")
     }
 }
 

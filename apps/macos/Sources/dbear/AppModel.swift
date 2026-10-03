@@ -298,8 +298,6 @@ final class AppModel {
     let scriptRowLimit = 10_000
     /// Incremented by ⌘F to focus the toolbar search field.
     var searchFocusRequest = 0
-    /// The toolbar search field has keyboard focus (it widens while it does).
-    var isSearchFocused = false
 
     /// SQL editor text size (⌘+ / ⌘- / ⌘0). Shared by all script tabs and remembered across launches.
     var editorFontSize: CGFloat = AppModel.storedEditorFontSize {

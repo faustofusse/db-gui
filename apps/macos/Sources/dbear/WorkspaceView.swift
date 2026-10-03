@@ -9,15 +9,20 @@ struct WorkspaceView: View {
     var body: some View {
         content
             .toolbar {
+                // [New Script] [Search] ……… [Discard] [Review & Save] [Refresh]
                 ToolbarItem { newScriptButton }
-
-                // Mail-like order: … [Search] [Refresh]
                 if #available(macOS 26.0, *) {
-                    ToolbarSpacer(.flexible)
+                    ToolbarSpacer(.fixed)
                 }
                 ToolbarItem { searchField }
                 if #available(macOS 26.0, *) {
-                    ToolbarSpacer(.fixed)
+                    ToolbarSpacer(.flexible)
+                }
+                if let tab = model.activeTableTab, !tab.edits.isEmpty {
+                    ToolbarItemGroup { PendingChangesButtons(tab: tab) }
+                    if #available(macOS 26.0, *) {
+                        ToolbarSpacer(.fixed)
+                    }
                 }
                 ToolbarItem { RefreshButton() }
             }
@@ -46,19 +51,10 @@ struct WorkspaceView: View {
             },
             focusRequest: model.searchFocusRequest,
             // Esc drops a condition typed but not applied: the field shows the filter in effect again.
-            onCancel: filterTab.map { tab in { tab.filterText = tab.appliedFilter ?? "" } },
-            onFocusChange: { focused in
-                // A focus change can arrive while SwiftUI is updating; apply it right after.
-                DispatchQueue.main.async { model.isSearchFocused = focused }
-            }
+            onCancel: filterTab.map { tab in { tab.filterText = tab.appliedFilter ?? "" } }
         )
-            // Widens while focused, like Safari's address field: room for a longer WHERE condition.
-            .frame(
-                minWidth: model.isSearchFocused ? 360 : 160,
-                idealWidth: model.isSearchFocused ? 560 : 280,
-                maxWidth: model.isSearchFocused ? 640 : 320
-            )
-            .animation(.easeOut(duration: 0.15), value: model.isSearchFocused)
+            // Fixed size, with room for a WHERE condition.
+            .frame(minWidth: 200, idealWidth: 360, maxWidth: 420)
     }
 
     private var newScriptButton: some View {
