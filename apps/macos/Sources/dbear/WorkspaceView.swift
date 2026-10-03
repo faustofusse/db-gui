@@ -9,12 +9,14 @@ struct WorkspaceView: View {
     var body: some View {
         content
             .toolbar {
-                // [New Script] [Search] ……… [Discard] [Review & Save] [Refresh]
+                // [New Script]  [Search] ……… [Discard] [Review] [Save]  [Refresh]
                 ToolbarItem { newScriptButton }
                 if #available(macOS 26.0, *) {
                     ToolbarSpacer(.fixed)
                 }
+                // Its own bubble: the search field's bezel, not a capsule shared with the buttons.
                 ToolbarItem { searchField }
+                    .sharedBackgroundIfAvailable(hidden: true)
                 if #available(macOS 26.0, *) {
                     ToolbarSpacer(.flexible)
                 }
@@ -53,8 +55,8 @@ struct WorkspaceView: View {
             // Esc drops a condition typed but not applied: the field shows the filter in effect again.
             onCancel: filterTab.map { tab in { tab.filterText = tab.appliedFilter ?? "" } }
         )
-            // Fixed size, with room for a WHERE condition.
-            .frame(minWidth: 200, idealWidth: 360, maxWidth: 420)
+            // Fixed size (never stretches with the window), with room for a WHERE condition.
+            .frame(width: 320)
     }
 
     private var newScriptButton: some View {

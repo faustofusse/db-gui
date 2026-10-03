@@ -9,8 +9,11 @@ struct AppCommands: Commands {
         // Safari-style: ⌘W closes the tab (or the window when no tabs are left), ⇧⌘W closes the window.
         CommandGroup(replacing: .saveItem) {
             // Enabled for any table tab: a cell being typed into isn't a pending edit until it's committed.
-            Button("Save Changes…") { if let tab = model.activeTableTab { model.reviewEdits(tab) } }
+            Button("Save Changes") { if let tab = model.activeTableTab { model.saveEditsNow(tab) } }
                 .keyboardShortcut("s", modifiers: .command)
+                .disabled(model.activeTableTab.map { $0.readOnlyReason != nil } ?? true)
+            Button("Review Changes…") { if let tab = model.activeTableTab { model.reviewEdits(tab) } }
+                .keyboardShortcut("s", modifiers: [.command, .shift])
                 .disabled(model.activeTableTab.map { $0.readOnlyReason != nil } ?? true)
             Button("Add Row") { if let tab = model.activeTableTab { model.setMode(.data, of: tab); model.addRow(tab) } }
                 .keyboardShortcut("n", modifiers: [.command, .option])

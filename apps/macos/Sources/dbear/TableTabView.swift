@@ -121,7 +121,8 @@ private struct RowButtons: View {
     }
 }
 
-/// Toolbar buttons shown while a tab has unsaved edits: Discard, and what changed (click → review, ⌘S).
+/// Toolbar buttons shown while a tab has unsaved edits: Discard, what changed (click → review, ⇧⌘S),
+/// and Save (⌘S, no review).
 struct PendingChangesButtons: View {
     @Environment(AppModel.self) private var model
     let tab: TableTab
@@ -140,7 +141,18 @@ struct PendingChangesButtons: View {
             }
             .labelStyle(.titleAndIcon)
         }
-        .help("Not saved yet. Review the SQL, then save in one transaction (⌘S)")
+        .help("Not saved yet. Review the SQL before saving (⇧⌘S)")
+
+        Button { model.saveEditsNow(tab) } label: {
+            Label {
+                Text("Save")
+            } icon: {
+                Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+            }
+            .labelStyle(.titleAndIcon)
+        }
+        .disabled(tab.isSaving)
+        .help("Save in one transaction (⌘S)")
     }
 }
 
@@ -186,6 +198,9 @@ private struct ReviewChangesSheet: View {
         .padding(20)
         .frame(width: 640)
         .task {
+            // A failed direct save (⌘S) opens this sheet to show why.
+            error = tab.saveError
+            tab.saveError = nil
             do {
                 statements = try model.previewEdits(tab)
             } catch {

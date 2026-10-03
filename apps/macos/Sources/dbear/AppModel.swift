@@ -103,6 +103,10 @@ final class TableTab: Identifiable {
     var editRequest: CellAddress?
     /// Review sheet before saving.
     var isReviewingEdits = false
+    /// A direct save (⌘S, no review) is running.
+    var isSaving = false
+    /// Why the last direct save failed; the review sheet opens to show it.
+    var saveError: String?
     var nextInsertedID = -1
 
     var query: RowQuery { RowQuery(sort: sort, filter: appliedFilter) }
@@ -956,6 +960,23 @@ final class AppModel {
         NSApp.keyWindow?.makeFirstResponder(nil)
         guard !tab.edits.isEmpty else { return }
         tab.isReviewingEdits = true
+    }
+
+    /// Saves without the review sheet (⌘S, the toolbar's Save). If it fails, the edits stay and
+    /// the review sheet opens with the error and the SQL that was tried.
+    func saveEditsNow(_ tab: TableTab) {
+        NSApp.keyWindow?.makeFirstResponder(nil)
+        guard !tab.edits.isEmpty, !tab.isSaving else { return }
+        tab.isSaving = true
+        Task {
+            defer { tab.isSaving = false }
+            do {
+                try await saveEdits(tab)
+            } catch {
+                tab.saveError = error.localizedDescription
+                tab.isReviewingEdits = true
+            }
+        }
     }
 
     func discardEdits(_ tab: TableTab) {

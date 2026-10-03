@@ -261,8 +261,8 @@ private struct DatabaseTitle<Items: View>: View {
     }
 }
 
-private extension ToolbarContent {
-    /// No Liquid Glass capsule behind the title, so it reads like the plain native title.
+extension ToolbarContent {
+    /// No shared Liquid Glass capsule behind the item (macOS 26), e.g. so it reads like the plain native title.
     func sharedBackgroundIfAvailable(hidden: Bool) -> some ToolbarContent {
         if #available(macOS 26.0, *) {
             return sharedBackgroundVisibility(hidden ? .hidden : .automatic)
