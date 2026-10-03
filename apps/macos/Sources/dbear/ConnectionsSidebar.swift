@@ -94,7 +94,9 @@ struct ConnectionsSidebar: View {
         Button("Duplicate") { model.duplicate(connection) }
         Button("Copy URL") {
             NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(connection.url(), forType: .string)
+            var config = connection
+            if config.password == nil { config.password = model.savedPassword(config.id) }
+            NSPasteboard.general.setString(config.url(includingPassword: true), forType: .string)
         }
         Divider()
         Button("Delete…", role: .destructive) { model.pendingDeletion = connection }
