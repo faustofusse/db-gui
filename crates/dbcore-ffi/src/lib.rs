@@ -480,8 +480,22 @@ impl CompletionCatalog {
         let offset = byte_offset_for_utf16(&text, location);
         let dialect = dbcore::dialect::Dialect(kind.into());
         let result = dbcore::complete::complete(&text, offset, &self.inner, dialect);
-        let start = utf16_offset_for_byte(&text, result.replace_start);
-        let end = utf16_offset_for_byte(&text, result.replace_end);
+        Self::utf16(&text, result)
+    }
+
+    /// Completions inside `schema.table`'s `WHERE` filter (`text` is just the condition).
+    pub fn complete_filter(&self, text: String, location: u32, kind: DatabaseKind, schema: String, table: String) -> Completions {
+        let offset = byte_offset_for_utf16(&text, location);
+        let dialect = dbcore::dialect::Dialect(kind.into());
+        let result = dbcore::complete::complete_filter(&text, offset, &self.inner, dialect, &schema, &table);
+        Self::utf16(&text, result)
+    }
+}
+
+impl CompletionCatalog {
+    fn utf16(text: &str, result: dbcore::complete::Completions) -> Completions {
+        let start = utf16_offset_for_byte(text, result.replace_start);
+        let end = utf16_offset_for_byte(text, result.replace_end);
         Completions { location: start, length: end - start, items: result.items.into_iter().map(Into::into).collect() }
     }
 }

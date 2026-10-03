@@ -25,8 +25,40 @@ struct WorkspaceView: View {
 
     private var searchField: some View {
         @Bindable var model = model
-        return ToolbarSearchField(text: $model.activeSearch, focusRequest: model.searchFocusRequest)
-            .frame(minWidth: 160, idealWidth: 280, maxWidth: 320)
+        let filterTab = model.isSearchAFilter ? model.activeTableTab : nil
+        return ToolbarSearchField(
+            text: $model.activeSearch,
+            prompt: filterTab != nil ? "WHERE …" : "Search",
+            help: filterTab != nil
+                ? "Filter rows with a SQL condition, e.g. status = 'paid' and total > 100. Return applies it, ✕ clears it, Esc leaves the field."
+                : nil,
+            monospaced: filterTab != nil,
+            onSubmit: filterTab.map { tab in { _ in model.applyFilter(tab) } },
+            complete: filterTab.map { tab in
+                { text, location in
+                    // Same catalog as the table's scripts; loaded on first use.
+                    guard let catalog = model.completionCatalog(for: tab.connection) else {
+                        model.loadCompletionCatalogIfNeeded(for: tab.connection)
+                        return nil
+                    }
+                    return catalog.completeFilter(text: text, location: location, kind: tab.connection.kind, table: tab.table)
+                }
+            },
+            focusRequest: model.searchFocusRequest,
+            // Esc drops a condition typed but not applied: the field shows the filter in effect again.
+            onCancel: filterTab.map { tab in { tab.filterText = tab.appliedFilter ?? "" } },
+            onFocusChange: { focused in
+                // A focus change can arrive while SwiftUI is updating; apply it right after.
+                DispatchQueue.main.async { model.isSearchFocused = focused }
+            }
+        )
+            // Widens while focused, like Safari's address field: room for a longer WHERE condition.
+            .frame(
+                minWidth: model.isSearchFocused ? 360 : 160,
+                idealWidth: model.isSearchFocused ? 560 : 280,
+                maxWidth: model.isSearchFocused ? 640 : 320
+            )
+            .animation(.easeOut(duration: 0.15), value: model.isSearchFocused)
     }
 
     private var newScriptButton: some View {

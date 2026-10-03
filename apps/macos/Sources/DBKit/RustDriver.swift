@@ -336,6 +336,18 @@ public final class CompletionCatalog: @unchecked Sendable {
             items: result.items.map(CompletionItem.init)
         )
     }
+
+    /// Completions inside `table`'s `WHERE` filter: `text` is just the condition, and `location`
+    /// and the returned range are UTF-16 offsets into it.
+    public func completeFilter(text: String, location: Int, kind: DatabaseKind, table: TableInfo) -> Completions {
+        let result = inner.completeFilter(
+            text: text, location: UInt32(clamping: max(0, location)), kind: DBCoreFFI.DatabaseKind(kind),
+            schema: table.schema, table: table.name)
+        return Completions(
+            range: NSRange(location: Int(result.location), length: Int(result.length)),
+            items: result.items.map(CompletionItem.init)
+        )
+    }
 }
 
 extension CompletionKind {

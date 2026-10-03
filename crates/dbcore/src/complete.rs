@@ -136,6 +136,18 @@ pub fn complete(sql: &str, offset: usize, catalog: &Catalog, dialect: Dialect) -
     Completions { replace_start, replace_end, items }
 }
 
+/// Completions inside a table's `WHERE` filter (the search field of a table tab): completed as if
+/// typed after `SELECT * FROM schema.table WHERE`, so the table's columns and condition keywords
+/// come first. `offset` and the returned range are relative to `filter`.
+pub fn complete_filter(filter: &str, offset: usize, catalog: &Catalog, dialect: Dialect, schema: &str, table: &str) -> Completions {
+    let prefix = format!("select * from {} where ", dialect.quote_relation(schema, table));
+    let sql = format!("{prefix}{filter}");
+    let mut result = complete(&sql, prefix.len() + offset.min(filter.len()), catalog, dialect);
+    result.replace_start = result.replace_start.saturating_sub(prefix.len());
+    result.replace_end = result.replace_end.saturating_sub(prefix.len());
+    result
+}
+
 // MARK: Tokenizing
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -931,5 +943,28 @@ mod tests {
     fn empty_catalog_does_not_panic() {
         let c = complete("select * from ", 14, &Catalog::default(), pg());
         assert!(c.items.is_empty() || c.items.iter().all(|i| i.kind == CompletionKind::Keyword));
+    }
+
+    #[test]
+    fn completes_inside_a_table_filter() {
+        let catalog = Catalog::new(
+            vec![Schema { name: "public".into(), tables: vec![TableInfo::new("public", "orders"), TableInfo::new("public", "users")] }],
+            vec![
+                TableColumns { schema: "public".into(), table: "orders".into(), columns: vec![col("id", "text"), col("status", "text"), col("total", "text")] },
+                TableColumns { schema: "public".into(), table: "users".into(), columns: vec![col("email", "text"), col("status_code", "text")] },
+            ],
+        );
+        let pg = Dialect(DatabaseKind::Postgres);
+        let filter = "total > 10 and sta";
+        let result = complete_filter(filter, filter.len(), &catalog, pg, "public", "orders");
+        // The range points into the filter, not the generated query around it.
+        assert_eq!(&filter[result.replace_start..result.replace_end], "sta");
+        let labels: Vec<_> = result.items.iter().map(|i| i.label.as_str()).collect();
+        assert_eq!(labels.first(), Some(&"status"), "{labels:?}");
+        assert!(!labels.contains(&"status_code"), "other tables' columns aren't offered: {labels:?}");
+
+        let empty = complete_filter("", 0, &catalog, pg, "public", "orders");
+        assert_eq!((empty.replace_start, empty.replace_end), (0, 0));
+        assert!(empty.items.iter().any(|i| i.label == "total"));
     }
 }

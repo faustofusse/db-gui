@@ -47,14 +47,9 @@ struct AppCommands: Commands {
         CommandGroup(after: .textEditing) {
             Button("Find") { model.searchFocusRequest += 1 }
                 .keyboardShortcut("f", modifiers: .command)
-            Button("Filter Rows") {
-                if let tab = model.activeTableTab {
-                    model.setMode(.data, of: tab)
-                    tab.filterFocusRequest += 1
-                }
-            }
-            .keyboardShortcut("f", modifiers: [.command, .option])
-            .disabled(model.activeTableTab == nil)
+            // Like a browser's address bar: ⌘L jumps to the search / WHERE field.
+            Button("Focus Search Field") { model.searchFocusRequest += 1 }
+                .keyboardShortcut("l", modifiers: .command)
         }
 
         // View menu. Only the SQL editor zooms; the rest of the UI keeps the system size.

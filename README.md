@@ -64,9 +64,11 @@ cargo test -p dbcore              # core (Postgres tests skip without a database
 - Passwords go in the system keychain, never in that file.
 - SQL highlighting uses tree-sitter with [DerekStride/tree-sitter-sql](https://github.com/DerekStride/tree-sitter-sql)
   (crate `tree-sitter-sequel`) in `dbcore::highlight`. The core returns spans and each frontend picks the colors.
-- Table tabs sort on the server (click a header: ascending → descending → off) and take a raw
-  `WHERE` filter. The core sorts by the primary key (or ctid/rowid) after the user's columns,
-  so pages stay stable. It also rejects a filter with a `;` between statements:
+- Table tabs sort on the server (click a header: ascending → descending → off). In a table's
+  Data view the toolbar search field (⌘L) is a raw `WHERE` filter, applied with Return and
+  completed like the script editor (`complete::complete_filter`). Elsewhere (Structure, script
+  results) it searches as you type. The core sorts by the primary key (or ctid/rowid) after the
+  user's columns, so pages stay stable. It also rejects a filter with a `;` between statements:
   `dialect::normalize_filter` is the only guard for MySQL, whose text protocol runs multiple
   statements. Postgres and SQLite also prepare a single statement.
 - Structure (⌥⌘2) comes from `Driver::describe_table`: columns with defaults and comments, the

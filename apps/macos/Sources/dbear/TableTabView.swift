@@ -11,7 +11,6 @@ struct TableTabView: View {
         switch tab.mode {
         case .data:
             VStack(spacing: 0) {
-                FilterBar(tab: tab)
                 if !tab.edits.isEmpty {
                     PendingChangesBar(tab: tab)
                 }
@@ -48,7 +47,8 @@ struct TableTabView: View {
             .safeAreaInset(edge: .bottom, spacing: 0) { BottomBar { ModePicker(tab: tab); Spacer() } }
         case .loaded(let result):
             DataGrid(
-                result: result, search: tab.search, version: tab.dataVersion,
+                // The search field is this tab's WHERE filter: rows are filtered by the server, not here.
+                result: result, search: "", version: tab.dataVersion,
                 paging: GridPaging(
                     hasMore: !tab.reachedEnd, isLoading: tab.isLoadingMore, error: tab.loadMoreError,
                     loadMore: { Task { await model.loadMore(tab) } },
@@ -60,6 +60,7 @@ struct TableTabView: View {
                 statusLeading: AnyView(HStack(spacing: 6) {
                     ModePicker(tab: tab)
                     RowButtons(tab: tab)
+                    FilterIndicator(tab: tab)
                 })
             )
         }
@@ -76,6 +77,23 @@ struct TableTabView: View {
             selectionChanged: { tab.selectedRowIDs = $0 },
             requestHandled: { tab.editRequest = nil }
         )
+    }
+}
+
+/// Funnel shown while the rows are filtered, with the condition in its tooltip; click to clear.
+private struct FilterIndicator: View {
+    @Environment(AppModel.self) private var model
+    let tab: TableTab
+
+    var body: some View {
+        if let filter = tab.appliedFilter {
+            Button { model.clearFilter(tab) } label: {
+                Image(systemName: "line.3.horizontal.decrease.circle.fill").foregroundStyle(.tint)
+            }
+            .buttonStyle(.borderless)
+            .help("Filtered: WHERE \(filter)\nClick to clear")
+            .padding(.trailing, 4)
+        }
     }
 }
 
@@ -215,86 +233,6 @@ private struct ModePicker: View {
         .fixedSize()
         .padding(.trailing, 6)
         .help("Show rows or the table’s columns, indexes and DDL (⌥⌘1 / ⌥⌘2)")
-    }
-}
-
-// MARK: - Filter bar
-
-/// `WHERE [condition…]` above the grid. Return applies it; the core rejects anything that isn't
-/// a single condition. Also shows the current sort, which header clicks set.
-private struct FilterBar: View {
-    @Environment(AppModel.self) private var model
-    @Bindable var tab: TableTab
-    @FocusState private var focused: Bool
-
-    var body: some View {
-        HStack(spacing: 8) {
-            HStack(spacing: 6) {
-                Text("WHERE")
-                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(tab.appliedFilter == nil ? .tertiary : .secondary)
-                TextField("condition, e.g. id > 100 and name like 'A%'", text: $tab.filterText)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 12, design: .monospaced))
-                    .focused($focused)
-                    .onSubmit { model.applyFilter(tab) }
-                    .onExitCommand { if tab.isFilterEdited { tab.filterText = tab.appliedFilter ?? "" } }
-                if tab.isFilterEdited {
-                    Text("↩ to apply")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                }
-                if !tab.filterText.isEmpty || tab.appliedFilter != nil {
-                    Button { model.clearFilter(tab) } label: {
-                        Image(systemName: "xmark.circle.fill").foregroundStyle(.tertiary)
-                    }
-                    .buttonStyle(.plain)
-                    .help("Clear Filter")
-                }
-            }
-            .padding(.horizontal, 8)
-            .frame(height: 24)
-            .background(
-                RoundedRectangle(cornerRadius: 6)
-                    .fill(.primary.opacity(tab.appliedFilter == nil ? 0.04 : 0.07))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 6)
-                    .strokeBorder(focused ? Color.accentColor.opacity(0.6) : .clear, lineWidth: 1)
-            )
-
-            if let key = tab.sort.first {
-                SortChip(key: key) { model.clearSort(tab) }
-            }
-        }
-        .padding(.horizontal, 10)
-        .padding(.bottom, 6)
-        .onChange(of: tab.filterFocusRequest, initial: false) { focused = true }
-    }
-}
-
-private struct SortChip: View {
-    let key: SortKey
-    let clear: () -> Void
-
-    var body: some View {
-        HStack(spacing: 4) {
-            Image(systemName: key.descending ? "arrow.down" : "arrow.up")
-                .font(.system(size: 10, weight: .semibold))
-            Text(key.column)
-                .font(.system(size: 12, design: .monospaced))
-                .lineLimit(1)
-            Button(action: clear) {
-                Image(systemName: "xmark").font(.system(size: 8, weight: .bold))
-            }
-            .buttonStyle(.plain)
-            .help("Clear Sort")
-        }
-        .foregroundStyle(.secondary)
-        .padding(.horizontal, 8)
-        .frame(height: 24)
-        .background(Capsule().fill(.primary.opacity(0.06)))
-        .help("Sorted by \(key.column) \(key.descending ? "descending" : "ascending"). Click a column header to change it.")
     }
 }
 

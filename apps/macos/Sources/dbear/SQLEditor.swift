@@ -55,6 +55,7 @@ struct SQLEditor: NSViewRepresentable {
 
         textView.string = text
         context.coordinator.textView = textView
+        context.coordinator.completion.textView = textView
         context.coordinator.catalog = completionCatalog
         context.coordinator.databaseKind = databaseKind
         context.coordinator.highlight()
@@ -108,37 +109,26 @@ struct SQLEditor: NSViewRepresentable {
         // MARK: Completion
         var catalog: CompletionCatalog?
         var databaseKind: DatabaseKind = .postgres
-        let popup = CompletionPopup()
-        /// Range in the text the accepted item replaces; set right before the popup is shown.
-        private var replaceRange: NSRange?
+        /// Shared with the search field (`CompletionSession`); this editor supplies the whole script.
+        let completion = CompletionSession()
         /// Text just inserted (or `nil`/empty for a deletion), captured before the change lands.
         private var lastInsertedText: String?
-        private var pendingCompletion: DispatchWorkItem?
-        /// Set in `textDidChange`, consumed by the `textViewDidChangeSelection` it triggers:
-        /// that selection change is a side effect of typing, not the caret moving on its own,
-        /// so it shouldn't hide the popup while `performCompletion` is still debounced.
-        private var selectionChangedByTyping = false
-        /// Set while `accept(_:)` is inserting the chosen item's text, so the resulting
-        /// `textDidChange` doesn't immediately reopen the popup it just closed.
-        private var isAccepting = false
 
         init(text: Binding<String>, theme: SQLTheme, onSelectionChange: @escaping ([NSRange]) -> Void) {
             self.text = text
             self.theme = theme
             self.onSelectionChange = onSelectionChange
             super.init()
-            popup.onAccept = { [weak self] item in self?.accept(item) }
+            completion.complete = { [weak self] text, location in
+                guard let self, let catalog = self.catalog else { return nil }
+                return catalog.complete(text: text, location: location, kind: self.databaseKind)
+            }
         }
 
         func textViewDidChangeSelection(_ notification: Notification) {
             guard let textView else { return }
             onSelectionChange(textView.selectedRanges.map(\.rangeValue))
-            defer { selectionChangedByTyping = false }
-            guard !selectionChangedByTyping else { return }
-            // Caret moved on its own (click, arrow keys, running the script\u2026): stop completing.
-            if popup.isVisible, let range = replaceRange, textView.selectedRange() != NSRange(location: NSMaxRange(range), length: 0) {
-                popup.hide()
-            }
+            completion.selectionDidChange()
         }
 
         func textView(_ textView: NSTextView, shouldChangeTextIn affectedCharRange: NSRange, replacementString: String?) -> Bool {
@@ -150,9 +140,7 @@ struct SQLEditor: NSViewRepresentable {
             guard let textView else { return }
             text.wrappedValue = textView.string
             highlight()
-            selectionChangedByTyping = true
-            guard !isAccepting else { return }
-            handleCompletionTrigger(lastInsertedText)
+            completion.textDidChange(inserted: lastInsertedText)
         }
 
         /// Small scripts are highlighted synchronously (no flash of unstyled text);
@@ -185,96 +173,15 @@ struct SQLEditor: NSViewRepresentable {
             }
             storage.endEditing()
         }
-
-        // MARK: Completion
-
-        private static let identifierChars = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_"))
-
-        /// Decides whether to trigger completion after a text change: immediately after `.`,
-        /// debounced while typing an identifier word, refiltered right away on deletion
-        /// (while the popup is open), and dismissed after anything else (space, `;`, `(`\u2026).
-        private func handleCompletionTrigger(_ inserted: String?) {
-            guard let inserted, let last = inserted.last else {
-                pendingCompletion?.cancel()
-                if popup.isVisible { performCompletion() }
-                return
-            }
-            if last == "." {
-                requestCompletion(immediate: true)
-            } else if String(last).rangeOfCharacter(from: Self.identifierChars) != nil {
-                requestCompletion(immediate: false)
-            } else {
-                pendingCompletion?.cancel()
-                popup.hide()
-            }
-        }
-
-        func requestCompletion(immediate: Bool) {
-            pendingCompletion?.cancel()
-            guard immediate else {
-                let work = DispatchWorkItem { [weak self] in self?.performCompletion() }
-                pendingCompletion = work
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: work)
-                return
-            }
-            performCompletion()
-        }
-
-        /// \u2303Space: always shows the list, even if the word is already complete.
-        func requestManualCompletion() {
-            pendingCompletion?.cancel()
-            performCompletion(manual: true)
-        }
-
-        /// Large scripts (already off the main thread for highlighting) skip automatic
-        /// completion; it's cheap, but there's no reason to run it on every keystroke there.
-        private func performCompletion(manual: Bool = false) {
-            guard !isAccepting, let textView, let catalog, let window = textView.window else {
-                popup.hide()
-                return
-            }
-            let source = textView.string
-            guard source.utf16.count < 200_000 else { return }
-            let location = textView.selectedRange().location
-            let result = catalog.complete(text: source, location: location, kind: databaseKind)
-            guard textView.selectedRange().location == location else { return } // caret moved meanwhile
-            // Nothing left to complete: the word typed already is the only suggestion.
-            let typed = (source as NSString).substring(with: result.range)
-            let onlyExactMatches = result.items.allSatisfy { $0.label.caseInsensitiveCompare(typed) == .orderedSame }
-            guard !result.items.isEmpty, manual || !onlyExactMatches else {
-                popup.hide()
-                return
-            }
-            replaceRange = result.range
-            var actual = NSRange()
-            let screenRect = textView.firstRect(forCharacterRange: result.range, actualRange: &actual)
-            popup.show(items: result.items, below: screenRect, in: window)
-        }
-
-        private func accept(_ item: CompletionItem) {
-            popup.hide()
-            guard let textView, let range = replaceRange, NSMaxRange(range) <= (textView.string as NSString).length else { return }
-            pendingCompletion?.cancel()
-            isAccepting = true
-            textView.insertText(item.insertText, replacementRange: range)
-            // The change notification isn't guaranteed to arrive inside `insertText`; keep
-            // suppressing auto-completion until this run loop turn is over.
-            DispatchQueue.main.async { [weak self] in
-                self?.pendingCompletion?.cancel()
-                self?.isAccepting = false
-            }
-        }
     }
 }
 
 extension SQLEditor.Coordinator: CompletionKeyHandling {
-    var isCompletionVisible: Bool { popup.isVisible }
-    func moveCompletionSelection(by delta: Int) { popup.moveSelection(by: delta) }
-    func dismissCompletion() { popup.hide() }
-
-    func acceptCompletion() {
-        if let item = popup.selectedItem { accept(item) } else { popup.hide() }
-    }
+    var isCompletionVisible: Bool { completion.isVisible }
+    func moveCompletionSelection(by delta: Int) { completion.moveSelection(by: delta) }
+    func dismissCompletion() { completion.dismiss() }
+    func acceptCompletion() { completion.acceptSelected() }
+    func requestManualCompletion() { completion.requestManual() }
 }
 
 /// Lets `SQLTextView` forward keys to the completion popup without depending on `SQLEditor` itself.
