@@ -1,7 +1,7 @@
 import DBCoreFFI
 import Foundation
 
-/// Saved connections, persisted by the Rust core as JSON (no passwords).
+/// Saved connections, persisted by the Rust core in SQLite (no passwords).
 /// Passwords go through a `SecretStore` (the Keychain in the app).
 public final class ConnectionStore: @unchecked Sendable {
     private let inner: DBCoreFFI.ConnectionStore
@@ -10,7 +10,7 @@ public final class ConnectionStore: @unchecked Sendable {
         self.inner = inner
     }
 
-    /// `~/Library/Application Support/dbear/connections.json`.
+    /// `~/Library/Application Support/dbear/dbear.db` (imports an old `connections.json` once).
     public static func openDefault() throws -> ConnectionStore {
         try bridged { ConnectionStore(try DBCoreFFI.ConnectionStore.openDefault()) }
     }

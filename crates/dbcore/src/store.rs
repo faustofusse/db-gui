@@ -1,93 +1,56 @@
-//! Saved connections: one JSON file shared by every frontend.
+//! Saved connections: one SQLite database shared by every frontend.
 //!
-//! Passwords are never written here. Frontends keep them in the platform keychain
-//! (Keychain on macOS, libsecret on Linux) keyed by connection id, and set
+//! Passwords are never written here (there is no column for them). Frontends keep them in the
+//! platform keychain (Keychain on macOS, libsecret on Linux) keyed by connection id, and set
 //! `ConnectionConfig::password` right before connecting.
+//!
+//! The schema is versioned with `PRAGMA user_version`; [`MIGRATIONS`] brings older files up to
+//! date. Several app instances can share the file: every write is its own transaction and the
+//! in-memory list is reloaded from disk afterwards.
 
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
+use rusqlite::{OptionalExtension, Transaction, params};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::driver::{Error, Result};
 use crate::model::{ConnectionConfig, DatabaseKind, SslMode};
 
-const FORMAT_VERSION: u32 = 1;
+/// File name inside the app's config folder.
+pub const DATABASE_FILE: &str = "dbear.db";
+/// The JSON store used before SQLite. Imported once, then renamed to `connections.json.migrated`.
+const LEGACY_JSON_FILE: &str = "connections.json";
 
-/// On-disk shape of a connection. Kept separate from [`ConnectionConfig`] so the file format
-/// stays stable (and password-free) while the in-memory model evolves.
-#[derive(Serialize, Deserialize)]
-struct StoredConnection {
-    id: String,
-    name: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    group: String,
-    kind: DatabaseKind,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    host: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    port: Option<u16>,
-    database: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    user: Option<String>,
-    #[serde(default)]
-    ssl_mode: SslMode,
-    /// Missing in files written before multi-database support: show them all.
-    #[serde(default = "default_true")]
-    show_all_databases: bool,
+/// Schema migrations; entry `n` upgrades `user_version` `n` to `n + 1`.
+const MIGRATIONS: &[&str] = &[
+    // 1: connections, in user order.
+    "create table connections (
+        id                 text primary key,
+        position           integer not null,
+        name               text not null,
+        grp                text not null default '',
+        kind               text not null,
+        host               text not null default '',
+        port               integer,
+        database           text not null default '',
+        user               text,
+        ssl_mode           text not null,
+        show_all_databases integer not null default 1
+    ) strict;
+    create index connections_position on connections (position);",
+];
+
+fn storage(path: &Path, e: impl std::fmt::Display) -> Error {
+    Error::Storage(format!("{}: {e}", path.display()))
 }
 
-fn default_true() -> bool {
-    true
-}
-
-#[derive(Serialize, Deserialize)]
-struct StoreFile {
-    version: u32,
-    connections: Vec<StoredConnection>,
-}
-
-impl From<&ConnectionConfig> for StoredConnection {
-    fn from(c: &ConnectionConfig) -> Self {
-        let name = c.name.trim();
-        Self {
-            id: c.id.clone(),
-            name: if name.is_empty() { c.default_name() } else { name.into() },
-            group: c.group.trim().into(),
-            kind: c.kind,
-            host: c.host.trim().into(),
-            port: c.port,
-            database: c.database.trim().into(),
-            user: c.user.as_deref().map(str::trim).filter(|u| !u.is_empty()).map(Into::into),
-            ssl_mode: c.ssl_mode,
-            show_all_databases: c.show_all_databases,
-        }
-    }
-}
-
-impl From<StoredConnection> for ConnectionConfig {
-    fn from(s: StoredConnection) -> Self {
-        Self {
-            id: s.id,
-            name: s.name,
-            group: s.group,
-            kind: s.kind,
-            host: s.host,
-            port: s.port,
-            database: s.database,
-            user: s.user,
-            password: None,
-            ssl_mode: s.ssl_mode,
-            show_all_databases: s.show_all_databases,
-        }
-    }
-}
-
-/// `~/Library/Application Support/dbear/connections.json` on macOS,
-/// `$XDG_CONFIG_HOME/dbear/connections.json` (or `~/.config/…`) elsewhere.
+/// `~/Library/Application Support/dbear/dbear.db` on macOS,
+/// `$XDG_CONFIG_HOME/dbear/dbear.db` (or `~/.config/…`) elsewhere.
 pub fn default_path() -> Option<PathBuf> {
-    Some(config_dir("dbear")?.join("connections.json"))
+    Some(config_dir("dbear")?.join(DATABASE_FILE))
 }
 
 /// The app was called DBGui before; its folder is moved over on first use.
@@ -121,45 +84,86 @@ pub fn new_id() -> String {
 
 pub struct ConnectionStore {
     path: PathBuf,
+    db: rusqlite::Connection,
     connections: Vec<ConnectionConfig>,
 }
 
 impl ConnectionStore {
-    /// Opens the store at [`default_path`], first moving over the folder from the app's old name.
+    /// Opens the store at [`default_path`]. First moves over the folder from the app's old name,
+    /// then imports the old `connections.json` if the database doesn't exist yet.
     pub fn open_default() -> Result<Self> {
         let path = default_path().ok_or_else(|| Error::Storage("no home directory".into()))?;
-        if let (Some(legacy), Some(dir)) = (config_dir(LEGACY_DIR_NAME), path.parent()) {
+        let dir = path.parent().unwrap_or(Path::new("."));
+        if let Some(legacy) = config_dir(LEGACY_DIR_NAME) {
             migrate_dir(&legacy, dir);
+        }
+        let json = dir.join(LEGACY_JSON_FILE);
+        if !path.exists() && json.is_file() {
+            return Self::import_json_store(&path, &json);
         }
         Self::open(path)
     }
 
-    /// Loads the file at `path`. A missing file is an empty store (created on first save).
+    /// Opens (creating it and its folder if needed) the database at `path`.
     pub fn open(path: impl Into<PathBuf>) -> Result<Self> {
         let path = path.into();
-        let connections = match fs::read(&path) {
-            Ok(bytes) => {
-                let file: StoreFile = serde_json::from_slice(&bytes)
-                    .map_err(|e| Error::Storage(format!("{} is not valid: {e}", path.display())))?;
-                if file.version > FORMAT_VERSION {
-                    return Err(Error::Storage(format!(
-                        "{} was written by a newer version of dbear",
-                        path.display()
-                    )));
+        let err = |e: &dyn std::fmt::Display| storage(&path, e);
+        if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+            fs::create_dir_all(dir).map_err(|e| err(&e))?;
+        }
+        let existed = path.exists();
+        let db = rusqlite::Connection::open(&path).map_err(|e| err(&e))?;
+        #[cfg(unix)]
+        if !existed {
+            use std::os::unix::fs::PermissionsExt;
+            // Hostnames and usernames are still worth keeping private (-wal/-shm inherit this).
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).map_err(|e| err(&e))?;
+        }
+        db.busy_timeout(Duration::from_secs(5)).map_err(|e| err(&e))?;
+        db.pragma_update(None, "journal_mode", "wal").map_err(|e| err(&e))?;
+        migrate(&db).map_err(|e| match e {
+            Error::Storage(msg) => Error::Storage(format!("{}: {msg}", path.display())),
+            other => other,
+        })?;
+        let mut store = Self { path, db, connections: Vec::new() };
+        store.reload()?;
+        Ok(store)
+    }
+
+    /// Creates the database at `path` from the old JSON store at `json`, then renames the JSON
+    /// file to `*.migrated`. On failure nothing is left behind and the JSON file is untouched.
+    fn import_json_store(path: &Path, json: &Path) -> Result<Self> {
+        let result = (|| {
+            let configs = read_json_store(json)?;
+            let mut store = Self::open(path)?;
+            store.write(|tx| {
+                for config in &configs {
+                    insert_or_update(tx, config)?;
                 }
-                file.connections.into_iter().map(Into::into).collect()
+                Ok(())
+            })?;
+            Ok(store)
+        })();
+        match result {
+            Ok(store) => {
+                let _ = fs::rename(json, json.with_extension("json.migrated"));
+                Ok(store)
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-            Err(e) => return Err(Error::Storage(format!("{}: {e}", path.display()))),
-        };
-        Ok(Self { path, connections })
+            Err(e) => {
+                for suffix in ["", "-wal", "-shm"] {
+                    let _ = fs::remove_file(format!("{}{suffix}", path.display()));
+                }
+                Err(e)
+            }
+        }
     }
 
     pub fn path(&self) -> &Path {
         &self.path
     }
 
-    /// Saved connections in user order. Passwords are always `None`.
+    /// Saved connections in user order, as of the last open/write/[`reload`](Self::reload).
+    /// Passwords are always `None`.
     pub fn connections(&self) -> &[ConnectionConfig] {
         &self.connections
     }
@@ -168,56 +172,199 @@ impl ConnectionStore {
         self.connections.iter().find(|c| c.id == id)
     }
 
-    /// Adds or replaces (by id) a connection and saves. An empty id gets a fresh one.
-    /// Returns the stored config (password stripped).
+    /// Re-reads the list from disk (picks up changes made by another app instance).
+    pub fn reload(&mut self) -> Result<()> {
+        self.connections = load(&self.db).map_err(|e| storage(&self.path, e))?;
+        Ok(())
+    }
+
+    /// Adds or replaces (by id) a connection and saves. An empty id gets a fresh one; new
+    /// connections go last. Returns the stored config (password stripped).
     pub fn upsert(&mut self, config: ConnectionConfig) -> Result<ConnectionConfig> {
         config.validate()?;
-        let mut stored: ConnectionConfig = StoredConnection::from(&config).into();
+        let mut stored = normalized(&config);
         if stored.id.is_empty() {
             stored.id = new_id();
         }
-        let mut next = self.connections.clone();
-        match next.iter_mut().find(|c| c.id == stored.id) {
-            Some(existing) => *existing = stored.clone(),
-            None => next.push(stored.clone()),
-        }
-        self.write(&next)?;
-        self.connections = next;
+        self.write(|tx| insert_or_update(tx, &stored))?;
         Ok(stored)
     }
 
     /// Removes a connection and saves. Returns whether it existed.
     pub fn remove(&mut self, id: &str) -> Result<bool> {
-        let next: Vec<_> = self.connections.iter().filter(|c| c.id != id).cloned().collect();
-        if next.len() == self.connections.len() {
-            return Ok(false);
-        }
-        self.write(&next)?;
-        self.connections = next;
-        Ok(true)
+        let mut removed = false;
+        self.write(|tx| {
+            removed = tx.execute("delete from connections where id = ?1", [id])? > 0;
+            Ok(())
+        })?;
+        Ok(removed)
     }
 
-    /// Atomic write: temp file in the same directory, then rename. Only touches memory on success.
-    fn write(&self, connections: &[ConnectionConfig]) -> Result<()> {
-        let err = |e: std::io::Error| Error::Storage(format!("{}: {e}", self.path.display()));
-        let dir = self.path.parent().unwrap_or(Path::new("."));
-        fs::create_dir_all(dir).map_err(err)?;
-
-        let file = StoreFile { version: FORMAT_VERSION, connections: connections.iter().map(Into::into).collect() };
-        let mut json = serde_json::to_vec_pretty(&file).map_err(|e| Error::Storage(e.to_string()))?;
-        json.push(b'\n');
-
-        let tmp = dir.join(format!(".{}.tmp", self.path.file_name().and_then(|n| n.to_str()).unwrap_or("connections")));
-        let mut f = fs::File::create(&tmp).map_err(err)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            // Hostnames and usernames are still worth keeping private.
-            f.set_permissions(fs::Permissions::from_mode(0o600)).map_err(err)?;
-        }
-        f.write_all(&json).and_then(|_| f.sync_all()).map_err(err)?;
-        fs::rename(&tmp, &self.path).map_err(err)
+    /// Runs `body` in an immediate transaction, then reloads the list.
+    fn write(&mut self, body: impl FnOnce(&Transaction) -> rusqlite::Result<()>) -> Result<()> {
+        let path = self.path.clone();
+        let err = |e: rusqlite::Error| storage(&path, e);
+        let tx = self.db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(err)?;
+        body(&tx).map_err(err)?;
+        tx.commit().map_err(err)?;
+        self.reload()
     }
+}
+
+/// Brings the schema up to date. Refuses files written by a newer dbear.
+fn migrate(db: &rusqlite::Connection) -> Result<()> {
+    let sql_err = |e: rusqlite::Error| Error::Storage(e.to_string());
+    let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0)).map_err(sql_err)?;
+    let version = usize::try_from(version).unwrap_or(usize::MAX);
+    if version > MIGRATIONS.len() {
+        return Err(Error::Storage("written by a newer version of dbear".into()));
+    }
+    for (n, sql) in MIGRATIONS.iter().enumerate().skip(version) {
+        let tx = db.unchecked_transaction().map_err(sql_err)?;
+        tx.execute_batch(sql).map_err(sql_err)?;
+        tx.pragma_update(None, "user_version", (n + 1) as i64).map_err(sql_err)?;
+        tx.commit().map_err(sql_err)?;
+    }
+    Ok(())
+}
+
+/// Trimmed, password-free, with an empty name replaced by the default one.
+fn normalized(c: &ConnectionConfig) -> ConnectionConfig {
+    let name = c.name.trim();
+    ConnectionConfig {
+        id: c.id.clone(),
+        name: if name.is_empty() { c.default_name() } else { name.into() },
+        group: c.group.trim().into(),
+        kind: c.kind,
+        host: c.host.trim().into(),
+        port: c.port,
+        database: c.database.trim().into(),
+        user: c.user.as_deref().map(str::trim).filter(|u| !u.is_empty()).map(Into::into),
+        password: None,
+        ssl_mode: c.ssl_mode,
+        show_all_databases: c.show_all_databases,
+    }
+}
+
+/// Serde name of a unit enum variant (`"postgres"`, `"verify-full"`), so the file matches the JSON/URL spelling.
+fn enum_text<T: Serialize>(value: &T) -> String {
+    serde_json::to_value(value).ok().and_then(|v| v.as_str().map(Into::into)).unwrap_or_default()
+}
+
+fn parse_enum<T: DeserializeOwned>(column: usize, text: String) -> rusqlite::Result<T> {
+    serde_json::from_value(serde_json::Value::String(text)).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(column, rusqlite::types::Type::Text, Box::new(e))
+    })
+}
+
+fn load(db: &rusqlite::Connection) -> rusqlite::Result<Vec<ConnectionConfig>> {
+    let mut stmt = db.prepare_cached(
+        "select id, name, grp, kind, host, port, database, user, ssl_mode, show_all_databases
+         from connections order by position, rowid",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok(ConnectionConfig {
+            id: r.get(0)?,
+            name: r.get(1)?,
+            group: r.get(2)?,
+            kind: parse_enum::<DatabaseKind>(3, r.get(3)?)?,
+            host: r.get(4)?,
+            port: r.get(5)?,
+            database: r.get(6)?,
+            user: r.get(7)?,
+            password: None,
+            ssl_mode: parse_enum::<SslMode>(8, r.get(8)?)?,
+            show_all_databases: r.get(9)?,
+        })
+    })?
+    .collect();
+    rows
+}
+
+/// Updates the row in place (keeping its position) or appends it.
+fn insert_or_update(tx: &Transaction, c: &ConnectionConfig) -> rusqlite::Result<()> {
+    let exists = tx.query_row("select 1 from connections where id = ?1", [&c.id], |_| Ok(())).optional()?.is_some();
+    let values = params![
+        c.id, c.name, c.group, enum_text(&c.kind), c.host, c.port, c.database, c.user,
+        enum_text(&c.ssl_mode), c.show_all_databases,
+    ];
+    if exists {
+        tx.execute(
+            "update connections set name = ?2, grp = ?3, kind = ?4, host = ?5, port = ?6, database = ?7,
+             user = ?8, ssl_mode = ?9, show_all_databases = ?10 where id = ?1",
+            values,
+        )?;
+    } else {
+        tx.execute(
+            "insert into connections (id, name, grp, kind, host, port, database, user, ssl_mode, show_all_databases, position)
+             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, (select coalesce(max(position), -1) + 1 from connections))",
+            values,
+        )?;
+    }
+    Ok(())
+}
+
+// MARK: Legacy JSON store (read once for migration)
+
+/// Shape of a connection in `connections.json` (format version 1).
+#[derive(Deserialize)]
+struct JsonConnection {
+    id: String,
+    name: String,
+    #[serde(default)]
+    group: String,
+    kind: DatabaseKind,
+    #[serde(default)]
+    host: String,
+    #[serde(default)]
+    port: Option<u16>,
+    #[serde(default)]
+    database: String,
+    #[serde(default)]
+    user: Option<String>,
+    #[serde(default)]
+    ssl_mode: SslMode,
+    /// Missing in files written before multi-database support: show them all.
+    #[serde(default = "default_true")]
+    show_all_databases: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Deserialize)]
+struct JsonFile {
+    version: u32,
+    connections: Vec<JsonConnection>,
+}
+
+fn read_json_store(path: &Path) -> Result<Vec<ConnectionConfig>> {
+    let bytes = fs::read(path).map_err(|e| storage(path, e))?;
+    let file: JsonFile = serde_json::from_slice(&bytes)
+        .map_err(|e| Error::Storage(format!("{} is not valid: {e}", path.display())))?;
+    if file.version > 1 {
+        return Err(Error::Storage(format!("{} was written by a newer version of dbear", path.display())));
+    }
+    Ok(file
+        .connections
+        .into_iter()
+        .map(|s| {
+            normalized(&ConnectionConfig {
+                id: s.id,
+                name: s.name,
+                group: s.group,
+                kind: s.kind,
+                host: s.host,
+                port: s.port,
+                database: s.database,
+                user: s.user,
+                password: None,
+                ssl_mode: s.ssl_mode,
+                show_all_databases: s.show_all_databases,
+            })
+        })
+        .collect())
 }
 
 #[cfg(test)]
@@ -236,45 +383,54 @@ mod tests {
     }
 
     #[test]
-    fn missing_file_is_empty_store() {
+    fn new_database_is_an_empty_store() {
         let dir = tempfile::tempdir().unwrap();
-        let store = ConnectionStore::open(dir.path().join("nested/connections.json")).unwrap();
+        let path = dir.path().join("nested/dbear.db");
+        let store = ConnectionStore::open(&path).unwrap();
         assert!(store.connections().is_empty());
+        assert!(path.exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        }
     }
 
     #[test]
     fn saves_and_reloads_without_passwords() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("sub/connections.json");
+        let path = dir.path().join("dbear.db");
         let mut store = ConnectionStore::open(&path).unwrap();
-        let saved = store.upsert(sample("dev")).unwrap();
+        let saved = store.upsert(ConnectionConfig { ssl_mode: SslMode::VerifyFull, port: Some(6543), ..sample("dev") }).unwrap();
         assert!(!saved.id.is_empty());
         assert_eq!(saved.password, None);
-
-        let json = fs::read_to_string(&path).unwrap();
-        assert!(!json.contains("secret"), "password leaked into {json}");
-        assert!(json.contains("\"ssl_mode\": \"prefer\""));
+        drop(store);
 
         let reloaded = ConnectionStore::open(&path).unwrap();
         assert_eq!(reloaded.connections(), [saved]);
+        let ssl: String = reloaded.db.query_row("select ssl_mode from connections", [], |r| r.get(0)).unwrap();
+        assert_eq!(ssl, "verify-full");
+        for file in fs::read_dir(dir.path()).unwrap() {
+            let bytes = fs::read(file.unwrap().path()).unwrap();
+            assert!(!bytes.windows(6).any(|w| w == b"secret"), "password leaked to disk");
+        }
     }
 
     #[test]
-    fn old_files_show_all_databases_and_the_flag_round_trips() {
+    fn show_all_databases_round_trips() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("c.json");
-        fs::write(&path, r#"{"version":1,"connections":[{"id":"x","name":"x","kind":"postgres","host":"h","database":"d"}]}"#).unwrap();
+        let path = dir.path().join("dbear.db");
         let mut store = ConnectionStore::open(&path).unwrap();
-        assert!(store.connections()[0].show_all_databases);
-        let only_one = ConnectionConfig { show_all_databases: false, ..store.connections()[0].clone() };
-        store.upsert(only_one).unwrap();
+        let saved = store.upsert(sample("x")).unwrap();
+        assert!(saved.show_all_databases);
+        store.upsert(ConnectionConfig { show_all_databases: false, ..saved }).unwrap();
         assert!(!ConnectionStore::open(&path).unwrap().connections()[0].show_all_databases);
     }
 
     #[test]
     fn empty_name_defaults_to_database_then_host() {
         let dir = tempfile::tempdir().unwrap();
-        let mut store = ConnectionStore::open(dir.path().join("c.json")).unwrap();
+        let mut store = ConnectionStore::open(dir.path().join("dbear.db")).unwrap();
         let with_db = store.upsert(ConnectionConfig { name: " ".into(), ..sample("x") }).unwrap();
         assert_eq!(with_db.name, "app");
         let no_db = ConnectionConfig { name: String::new(), database: String::new(), host: "db.internal".into(), ..sample("x") };
@@ -284,7 +440,7 @@ mod tests {
     #[test]
     fn upsert_replaces_in_place_and_remove_deletes() {
         let dir = tempfile::tempdir().unwrap();
-        let mut store = ConnectionStore::open(dir.path().join("c.json")).unwrap();
+        let mut store = ConnectionStore::open(dir.path().join("dbear.db")).unwrap();
         let a = store.upsert(sample("a")).unwrap();
         let b = store.upsert(sample("b")).unwrap();
         store.upsert(ConnectionConfig { name: "a2".into(), ..a.clone() }).unwrap();
@@ -299,21 +455,68 @@ mod tests {
     #[test]
     fn rejects_invalid_config_without_writing() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("c.json");
-        let mut store = ConnectionStore::open(&path).unwrap();
+        let mut store = ConnectionStore::open(dir.path().join("dbear.db")).unwrap();
         let no_host = ConnectionConfig { host: " ".into(), ..sample("x") };
         assert!(matches!(store.upsert(no_host), Err(Error::InvalidConfig(_))));
-        assert!(!path.exists());
+        assert!(store.connections().is_empty());
+    }
+
+    #[test]
+    fn two_instances_see_each_others_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dbear.db");
+        let mut one = ConnectionStore::open(&path).unwrap();
+        let mut two = ConnectionStore::open(&path).unwrap();
+        let a = one.upsert(sample("a")).unwrap();
+        let b = two.upsert(sample("b")).unwrap();
+        // `two` saw `a` when it reloaded after its own write; `one` catches up on reload.
+        assert_eq!(two.connections(), [a.clone(), b.clone()]);
+        one.reload().unwrap();
+        assert_eq!(one.connections(), [a, b]);
     }
 
     #[test]
     fn reports_corrupt_and_future_files() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("c.json");
-        fs::write(&path, "{nope").unwrap();
+        let path = dir.path().join("dbear.db");
+        fs::write(&path, "definitely not sqlite, just some text that is long enough").unwrap();
         assert!(matches!(ConnectionStore::open(&path), Err(Error::Storage(_))));
-        fs::write(&path, r#"{"version": 99, "connections": []}"#).unwrap();
-        assert!(matches!(ConnectionStore::open(&path), Err(Error::Storage(_))));
+
+        let future = dir.path().join("future.db");
+        rusqlite::Connection::open(&future).unwrap().pragma_update(None, "user_version", 99).unwrap();
+        let Err(Error::Storage(msg)) = ConnectionStore::open(&future) else { panic!("expected a storage error") };
+        assert!(msg.contains("newer version"), "{msg}");
+    }
+
+    #[test]
+    fn imports_the_json_store_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, json) = (dir.path().join("dbear.db"), dir.path().join("connections.json"));
+        fs::write(
+            &json,
+            r#"{"version":1,"connections":[
+                {"id":"b","name":"second","kind":"postgres","host":"h","database":"d","ssl_mode":"require"},
+                {"id":"a","name":"first","group":"Prod","kind":"mysql","host":"m","port":3307,"database":"","user":"root","show_all_databases":false}
+            ]}"#,
+        )
+        .unwrap();
+        let store = ConnectionStore::import_json_store(&db, &json).unwrap();
+        let got: Vec<_> = store.connections().iter().map(|c| (c.id.as_str(), c.ssl_mode, c.show_all_databases)).collect();
+        assert_eq!(got, [("b", SslMode::Require, true), ("a", SslMode::Prefer, false)]);
+        assert_eq!(store.connections()[1].port, Some(3307));
+        assert!(!json.exists() && dir.path().join("connections.json.migrated").exists());
+    }
+
+    #[test]
+    fn failed_json_import_leaves_no_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, json) = (dir.path().join("dbear.db"), dir.path().join("connections.json"));
+        fs::write(&json, "{nope").unwrap();
+        assert!(matches!(ConnectionStore::import_json_store(&db, &json), Err(Error::Storage(_))));
+        assert!(!db.exists() && json.exists());
+        fs::write(&json, r#"{"version": 99, "connections": []}"#).unwrap();
+        assert!(ConnectionStore::import_json_store(&db, &json).is_err());
+        assert!(!db.exists());
     }
 
     #[test]
@@ -334,7 +537,7 @@ mod tests {
     #[test]
     fn default_path_is_platform_specific() {
         let p = default_path().unwrap();
-        assert!(p.ends_with("connections.json"));
+        assert!(p.ends_with(DATABASE_FILE));
         if cfg!(target_os = "macos") {
             assert!(p.to_string_lossy().contains("Library/Application Support/dbear"));
         }

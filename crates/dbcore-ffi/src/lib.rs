@@ -281,7 +281,7 @@ impl Connection {
     }
 }
 
-/// Saved connections (JSON file, no passwords). Passwords live in the Keychain, owned by the app.
+/// Saved connections (SQLite file, no passwords). Passwords live in the Keychain, owned by the app.
 #[derive(uniffi::Object)]
 pub struct ConnectionStore {
     inner: Mutex<dbcore::ConnectionStore>,
@@ -289,13 +289,13 @@ pub struct ConnectionStore {
 
 #[uniffi::export]
 impl ConnectionStore {
-    /// Opens the store at `path` (a missing file is an empty store).
+    /// Opens the store at `path`, creating an empty one if it doesn't exist.
     #[uniffi::constructor]
     pub fn open(path: String) -> Result<Arc<Self>, DbError> {
         Ok(Arc::new(Self { inner: Mutex::new(dbcore::ConnectionStore::open(path)?) }))
     }
 
-    /// Opens the store at the platform default location (migrating the old DBGui folder).
+    /// Opens the store at the platform default location (migrating the old DBGui folder and `connections.json`).
     #[uniffi::constructor]
     pub fn open_default() -> Result<Arc<Self>, DbError> {
         Ok(Arc::new(Self { inner: Mutex::new(dbcore::ConnectionStore::open_default()?) }))

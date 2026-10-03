@@ -4,7 +4,7 @@ import Testing
 
 private func tempStorePath() -> String {
     FileManager.default.temporaryDirectory
-        .appendingPathComponent("dbear-tests-\(UUID().uuidString)/connections.json").path
+        .appendingPathComponent("dbear-tests-\(UUID().uuidString)/dbear.db").path
 }
 
 @Test func storeRoundTripsWithoutPasswords() throws {
@@ -22,8 +22,12 @@ private func tempStorePath() -> String {
     let saved = try store.upsert(draft)
     #expect(!saved.id.isEmpty && saved.name == "prod" && saved.password == nil)
 
-    let json = try String(contentsOfFile: path, encoding: .utf8)
-    #expect(!json.contains("hunter2"))
+    // Nothing on disk (database, WAL) contains the password.
+    let dir = (path as NSString).deletingLastPathComponent
+    for file in try FileManager.default.contentsOfDirectory(atPath: dir) {
+        let bytes = try Data(contentsOf: URL(fileURLWithPath: dir).appendingPathComponent(file))
+        #expect(bytes.range(of: Data("hunter2".utf8)) == nil, "password leaked into \(file)")
+    }
     #expect(try ConnectionStore.open(path: path).connections() == [saved])
 
     #expect(try store.remove(id: saved.id))

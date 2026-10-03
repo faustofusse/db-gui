@@ -59,8 +59,10 @@ cargo test -p dbcore              # core (Postgres tests skip without a database
 
 ## Notes
 
-- Connections are saved to `~/Library/Application Support/dbear/connections.json` (or
-  `$XDG_CONFIG_HOME/dbear/` on Linux). Override the path with `DBEAR_CONNECTIONS_FILE`.
+- Connections are saved in a SQLite database, `~/Library/Application Support/dbear/dbear.db` (or
+  `$XDG_CONFIG_HOME/dbear/` on Linux), versioned with `PRAGMA user_version`. An old
+  `connections.json` is imported once and renamed to `connections.json.migrated`. Override the
+  path with `DBEAR_CONNECTIONS_FILE`.
 - Passwords go in the system keychain, never in that file.
 - SQL highlighting uses tree-sitter with [DerekStride/tree-sitter-sql](https://github.com/DerekStride/tree-sitter-sql)
   (crate `tree-sitter-sequel`) in `dbcore::highlight`. The core returns spans and each frontend picks the colors.
