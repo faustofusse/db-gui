@@ -99,7 +99,8 @@ private struct GridTable: NSViewRepresentable {
         table.dataSource = context.coordinator
         table.delegate = context.coordinator
 
-        let scroll = NSScrollView()
+        // Pinned: wide results keep their horizontal scrollbar visible.
+        let scroll = PinnedScrollView()
         scroll.documentView = table
         scroll.hasVerticalScroller = true
         scroll.hasHorizontalScroller = true
@@ -410,7 +411,7 @@ final class GridData: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSTe
             let original = rows[rowIndex].values[safe: column] ?? .null
             return original.isNull ? .null : .text(original.displayString)
         }()
-        let field = CellEditor(frame: table.frameOfCell(atColumn: tableColumn, row: rowIndex).insetBy(dx: -4, dy: 1))
+        let field = CellEditor(frame: table.frameOfCell(atColumn: tableColumn, row: rowIndex).insetBy(dx: -CellEditor.inset, dy: 0))
         field.row = id
         field.column = column
         field.font = GridCell.font
@@ -581,6 +582,14 @@ final class CellEditor: NSTextField {
     /// The cell was NULL/DEFAULT: leaving it blank changes nothing.
     var startedBlank = false
 
+    /// Horizontal room around the text, so it sits where `GridCell` drew it.
+    static let inset: CGFloat = 4
+
+    override class var cellClass: AnyClass? {
+        get { CellEditorCell.self }
+        set {}
+    }
+
     override init(frame: NSRect) {
         super.init(frame: frame)
         isBordered = false
@@ -594,6 +603,44 @@ final class CellEditor: NSTextField {
     }
 
     required init?(coder: NSCoder) { fatalError() }
+}
+
+/// Lays out the editor's text exactly like `GridCell.draw`: inset horizontally, one line centered vertically.
+private final class CellEditorCell: NSTextFieldCell {
+    /// Own field editor without line fragment padding, so the text isn't nudged sideways.
+    private lazy var editor: NSTextView = {
+        let view = NSTextView()
+        view.isFieldEditor = true
+        view.textContainer?.lineFragmentPadding = 0
+        return view
+    }()
+    private var adjusted = false
+
+    override func fieldEditor(for controlView: NSView) -> NSTextView? { editor }
+
+    override func drawingRect(forBounds rect: NSRect) -> NSRect {
+        if adjusted { return rect }
+        let font = font ?? GridCell.font
+        let lineHeight = ceil(font.ascender - font.descender + font.leading)
+        return NSRect(x: rect.minX + CellEditor.inset, y: rect.minY + ((rect.height - lineHeight) / 2).rounded(),
+                      width: rect.width - 2 * CellEditor.inset, height: lineHeight)
+    }
+
+    override func titleRect(forBounds rect: NSRect) -> NSRect { drawingRect(forBounds: rect) }
+
+    override func edit(withFrame rect: NSRect, in controlView: NSView, editor textObj: NSText, delegate: Any?, event: NSEvent?) {
+        let frame = drawingRect(forBounds: rect)
+        adjusted = true
+        super.edit(withFrame: frame, in: controlView, editor: textObj, delegate: delegate, event: event)
+        adjusted = false
+    }
+
+    override func select(withFrame rect: NSRect, in controlView: NSView, editor textObj: NSText, delegate: Any?, start selStart: Int, length selLength: Int) {
+        let frame = drawingRect(forBounds: rect)
+        adjusted = true
+        super.select(withFrame: frame, in: controlView, editor: textObj, delegate: delegate, start: selStart, length: selLength)
+        adjusted = false
+    }
 }
 
 /// Menu item that runs a closure.

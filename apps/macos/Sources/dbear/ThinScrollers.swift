@@ -10,7 +10,10 @@ final class ThinScroller: NSScroller {
     override class var isCompatibleWithOverlayScrollers: Bool { true }
 
     override class func scrollerWidth(for controlSize: NSControl.ControlSize, scrollerStyle: NSScroller.Style) -> CGFloat {
-        thickness + inset * 2
+        // Legacy (always-visible) scrollers draw the knob into a layer AppKit places 11pt deep,
+        // ending 3pt before the far edge. At 11pt that layer covers the middle, so a centered
+        // knob isn't clipped.
+        scrollerStyle == .legacy ? 11 : thickness + inset * 2
     }
 
     override func drawKnobSlot(in slotRect: NSRect, highlight flag: Bool) {}
@@ -19,9 +22,10 @@ final class ThinScroller: NSScroller {
         let knob = rect(for: .knob)
         guard knob.width > 0, knob.height > 0 else { return }
         let (t, i) = (Self.thickness, Self.inset)
+        // Centered across the scroller's thickness.
         let r = bounds.height > bounds.width
-            ? NSRect(x: knob.maxX - t - i, y: knob.minY + i, width: t, height: knob.height - i * 2)
-            : NSRect(x: knob.minX + i, y: knob.maxY - t - i, width: knob.width - i * 2, height: t)
+            ? NSRect(x: (bounds.midX - t / 2).rounded(), y: knob.minY + i, width: t, height: knob.height - i * 2)
+            : NSRect(x: knob.minX + i, y: (bounds.midY - t / 2).rounded(), width: knob.width - i * 2, height: t)
         // Dim: present enough to show position, never competing with content.
         NSColor.labelColor.withAlphaComponent(0.16).setFill()
         NSBezierPath(roundedRect: r, xRadius: t / 2, yRadius: t / 2).fill()
@@ -75,10 +79,15 @@ extension NSScrollView {
             horizontalScroller = ThinScroller()
             changed = true
         }
-        if scrollerStyle != .overlay {
-            scrollerStyle = .overlay
+        let style: NSScroller.Style = self is PinnedScrollView ? .legacy : .overlay
+        if scrollerStyle != style {
+            scrollerStyle = style
             changed = true
         }
         if changed { tile() }
     }
 }
+
+/// Scroll view whose scrollers stay on screen whenever the content overflows, instead of
+/// fading out after scrolling. Still uses `ThinScroller`.
+final class PinnedScrollView: NSScrollView {}
