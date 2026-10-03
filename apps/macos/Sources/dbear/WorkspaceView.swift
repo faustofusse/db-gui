@@ -1,3 +1,4 @@
+import AppKit
 import DBKit
 import SwiftUI
 
@@ -68,6 +69,23 @@ struct WorkspaceView: View {
 private struct TabStrip: View {
     @Environment(AppModel.self) private var model
     @State private var hoveredID: UUID?
+    /// Frame of each tab in the `tabs` coordinate space. It includes the drag offset, so a drag
+    /// works from the snapshot it took when it started (`TabDrag.frames`).
+    @State private var frames: [UUID: CGRect] = [:]
+    @State private var drag: TabDrag?
+    @State private var middleClickMonitor: Any?
+
+    private static let space = "tabs"
+
+    /// A tab being dragged to reorder it. Tabs are only reordered on drop; during the drag the
+    /// other tabs just slide aside with offsets, measured against the frames at drag start.
+    private struct TabDrag {
+        let id: UUID
+        let from: Int
+        let frames: [UUID: CGRect]
+        var translation: CGFloat
+        var target: Int
+    }
 
     var body: some View {
         HStack(spacing: 8) {
@@ -84,8 +102,18 @@ private struct TabStrip: View {
                             set: { hoveredID = $0 ? tab.id : (hoveredID == tab.id ? nil : hoveredID) }
                         )
                     )
+                    .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(Self.space)) } action: {
+                        frames[tab.id] = $0
+                    }
+                    // While dragged, the tab stays in its slot (it owns the gesture) but is drawn by
+                    // the overlay below, above the tabs it passes over.
+                    .opacity(drag?.id == tab.id ? 0 : 1)
+                    .offset(x: dragOffset(of: tab.id))
+                    .gesture(dragGesture(for: tab.id))
                 }
             }
+            .coordinateSpace(.named(Self.space))
+            .overlay(alignment: .topLeading) { draggedTab }
             .padding(2)
             .frame(height: 30)
             .background(Capsule().fill(.primary.opacity(0.06)))
@@ -95,10 +123,92 @@ private struct TabStrip: View {
         .padding(.horizontal, 10)
         .padding(.top, 4)
         .padding(.bottom, 6)
+        .onAppear(perform: installMiddleClickMonitor)
+        .onDisappear {
+            if let middleClickMonitor { NSEvent.removeMonitor(middleClickMonitor) }
+            middleClickMonitor = nil
+        }
     }
 
     private func isHighlighted(_ id: UUID) -> Bool {
         id == model.activeTabID || id == hoveredID
+    }
+
+    // MARK: Drag to reorder
+
+    /// The dragged tab, drawn on top of the strip at the pointer. Its own fill is translucent,
+    /// so it gets an opaque backing to hide the tabs underneath.
+    @ViewBuilder
+    private var draggedTab: some View {
+        if let drag, let tab = model.tabs.first(where: { $0.id == drag.id }), let frame = drag.frames[drag.id] {
+            TabItem(tab: tab, isActive: tab.id == model.activeTabID, hovered: .constant(true))
+                .frame(width: frame.width, height: frame.height)
+                .background(Capsule().fill(Color(nsColor: .windowBackgroundColor)))
+                .offset(x: frame.minX + drag.translation, y: frame.minY)
+                .allowsHitTesting(false)
+        }
+    }
+
+    /// The tabs the dragged one has passed shift one slot toward its original position.
+    private func dragOffset(of id: UUID) -> CGFloat {
+        guard let drag, let dragged = drag.frames[drag.id] else { return 0 }
+        if id == drag.id { return 0 }
+        guard let index = model.tabs.firstIndex(where: { $0.id == id }) else { return 0 }
+        let step = dragged.width + separatorWidth(drag.frames)
+        if drag.from < index, index <= drag.target { return -step }
+        if drag.target <= index, index < drag.from { return step }
+        return 0
+    }
+
+    /// Space between two adjacent tabs (the separator).
+    private func separatorWidth(_ frames: [UUID: CGRect]) -> CGFloat {
+        guard model.tabs.count > 1, let a = frames[model.tabs[0].id], let b = frames[model.tabs[1].id] else { return 1 }
+        return max(0, b.minX - a.maxX)
+    }
+
+    private func dragGesture(for id: UUID) -> some Gesture {
+        DragGesture(minimumDistance: 4, coordinateSpace: .global)
+            .onChanged { value in
+                if drag?.id != id {
+                    guard let from = model.tabs.firstIndex(where: { $0.id == id }) else { return }
+                    drag = TabDrag(id: id, from: from, frames: frames, translation: 0, target: from)
+                    model.activate(id)
+                }
+                guard let from = drag?.from, let frames = drag?.frames, let frame = frames[id] else { return }
+                // Keep the tab inside the strip.
+                var translation = value.translation.width
+                if let first = model.tabs.first.flatMap({ frames[$0.id] }) {
+                    translation = max(translation, first.minX - frame.minX)
+                }
+                if let last = model.tabs.last.flatMap({ frames[$0.id] }) {
+                    translation = min(translation, last.maxX - frame.maxX)
+                }
+                // Target slot: how many other tabs the dragged tab's center has passed.
+                let center = frame.midX + translation
+                let target = model.tabs.enumerated().filter { index, tab in
+                    index != from && (frames[tab.id]?.midX ?? .infinity) < center
+                }.count
+                drag?.translation = translation
+                drag?.target = target
+            }
+            .onEnded { _ in
+                if let drag { model.moveTab(drag.id, to: drag.target) }
+                drag = nil
+            }
+    }
+
+    // MARK: Middle click closes
+
+    /// SwiftUI has no middle-click gesture, so watch for it and close the tab under the pointer.
+    private func installMiddleClickMonitor() {
+        guard middleClickMonitor == nil else { return }
+        middleClickMonitor = NSEvent.addLocalMonitorForEvents(matching: .otherMouseUp) { [model] event in
+            guard event.buttonNumber == 2, let id = hoveredID,
+                  model.tabs.contains(where: { $0.id == id }) else { return event }
+            hoveredID = nil
+            model.requestClose(id)
+            return nil
+        }
     }
 }
 

@@ -87,13 +87,15 @@ struct AppCommands: Commands {
                 .keyboardShortcut("]", modifiers: [.command, .shift])
                 .disabled(model.tabs.count < 2)
 
+            // Not disabled by tab count: SwiftUI doesn't reliably refresh `.disabled` inside a
+            // nested command Menu, so a stale count swallowed ⌘N for newly opened tabs.
+            // `selectTab` ignores numbers past the last tab.
             Menu("Select Tab") {
                 ForEach(1...9, id: \.self) { number in
                     Button(number == 9 ? "Last Tab" : "Tab \(number)") {
                         model.selectTab(number: number)
                     }
                     .keyboardShortcut(KeyEquivalent(Character("\(number)")), modifiers: .command)
-                    .disabled(number == 9 ? model.tabs.isEmpty : model.tabs.count < number)
                 }
             }
 

@@ -762,6 +762,13 @@ final class AppModel {
         activate(id)
     }
 
+    /// Moves a tab to `index` (its position after the move), e.g. while dragging it in the tab strip.
+    func moveTab(_ id: UUID, to index: Int) {
+        guard let from = tabs.firstIndex(where: { $0.id == id }), tabs.indices.contains(index), from != index
+        else { return }
+        tabs.insert(tabs.remove(at: from), at: index)
+    }
+
     private func insertAfterActive(_ tab: WorkspaceTab) {
         if let active = tabs.firstIndex(where: { $0.id == activeTabID }) {
             tabs.insert(tab, at: active + 1)
