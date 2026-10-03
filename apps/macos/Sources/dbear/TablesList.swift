@@ -40,10 +40,13 @@ struct TablesList: View {
 
                     Menu {
                         Button("Refresh") { Task { await model.loadSchemas() } }
-                        Divider()
-                        Button("Expand All") { collapsed.removeAll() }
-                        Button("Collapse All") {
-                            collapsed = Set(model.schemas.value?.map(\.name) ?? [])
+                        // A single MySQL database has no sections to fold.
+                        if singleDatabase(in: model.schemas.value ?? []) == nil {
+                            Divider()
+                            Button("Expand All") { collapsed.removeAll() }
+                            Button("Collapse All") {
+                                collapsed = Set(model.schemas.value?.map(\.name) ?? [])
+                            }
                         }
                     } label: {
                         Label("More", systemImage: "ellipsis")
@@ -89,6 +92,28 @@ struct TablesList: View {
         }
     }
 
+    /// The one database a MySQL connection browses (its only "schema"), if that's what's shown.
+    private func singleDatabase(in schemas: [Schema]) -> Schema? {
+        guard model.selectedTarget?.kind == .mysql, schemas.count == 1 else { return nil }
+        return schemas[0]
+    }
+
+    private func tableRow(_ table: TableInfo) -> some View {
+        TableRow(table: table)
+            .id(table.id)
+            .mailSelection(table.id == model.selectedTableID) {
+                model.openTable(table, pinned: false)
+                focused = true
+            }
+            // Double-click keeps the tab open instead of previewing.
+            .simultaneousGesture(TapGesture(count: 2).onEnded {
+                model.openTable(table, pinned: true)
+            })
+            .contextMenu {
+                Button("Open in New Tab") { model.openTable(table, pinned: true) }
+            }
+    }
+
     private var subtitle: String {
         guard let schemas = model.schemas.value else {
             // Not the connection summary: host names are long, and the title jumped while loading.
@@ -96,9 +121,11 @@ struct TablesList: View {
         }
         if tablesOnly { return "Filter by: Tables only" }
         let tables = schemas.reduce(0) { $0 + $1.tables.count }
-        // MySQL databases are listed as the sections; SQLite's are attached databases.
-        let section = model.selectedTarget?.kind == .postgres ? "schema" : "database"
         func count(_ n: Int, _ noun: String) -> String { "\(n) \(noun)\(n == 1 ? "" : "s")" }
+        // A MySQL connection browses one database: its only section is the database itself.
+        if model.selectedTarget?.kind == .mysql, schemas.count == 1 { return count(tables, "table") }
+        // Without a database, MySQL lists every database as a section; SQLite's are attached databases.
+        let section = model.selectedTarget?.kind == .postgres ? "schema" : "database"
         return "\(count(schemas.count, section)), \(count(tables, "table"))"
     }
 
@@ -122,32 +149,24 @@ struct TablesList: View {
             case .loaded(let schemas):
                 ScrollViewReader { proxy in
                 List {
-                    ForEach(schemas) { schema in
-                        Section(isExpanded: expansion(for: schema.name)) {
-                            ForEach(visibleTables(in: schema)) { table in
-                                TableRow(table: table)
-                                    .id(table.id)
-                                    .mailSelection(table.id == model.selectedTableID) {
-                                        model.openTable(table, pinned: false)
-                                        focused = true
-                                    }
-                                    // Double-click keeps the tab open instead of previewing.
-                                    .simultaneousGesture(TapGesture(count: 2).onEnded {
-                                        model.openTable(table, pinned: true)
-                                    })
-                                    .contextMenu {
-                                        Button("Open in New Tab") { model.openTable(table, pinned: true) }
-                                    }
+                    if let database = singleDatabase(in: schemas) {
+                        // A MySQL database has no schemas: its tables, without a header repeating the title.
+                        ForEach(visibleTables(in: database)) { table in tableRow(table) }
+                    } else {
+                        ForEach(schemas) { schema in
+                            Section(isExpanded: expansion(for: schema.name)) {
+                                ForEach(visibleTables(in: schema)) { table in tableRow(table) }
+                            } header: {
+                                Text(schema.name)
                             }
-                        } header: {
-                            Text(schema.name)
                         }
                     }
                 }
                 .listStyle(.sidebar)
                 .scrollContentBackground(.hidden)
                 .arrowKeySelection(
-                    ids: schemas.filter { !collapsed.contains($0.name) }.flatMap { visibleTables(in: $0).map(\.id) },
+                    ids: singleDatabase(in: schemas).map { visibleTables(in: $0).map(\.id) }
+                        ?? schemas.filter { !collapsed.contains($0.name) }.flatMap { visibleTables(in: $0).map(\.id) },
                     selected: model.selectedTableID,
                     focus: $focused
                 ) { id in

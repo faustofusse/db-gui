@@ -38,10 +38,15 @@ private let sqliteSeeded = FileManager.default.fileExists(atPath: Drivers.sample
 }
 
 @Test(.enabled(if: mysqlEnabled)) func realMySQLRoundTrip() async throws {
-    #expect(!devMySQL.supportsMultipleDatabases && devMySQL.showAllDatabases)
+    #expect(devMySQL.supportsMultipleDatabases && devMySQL.showAllDatabases)
     let driver = Drivers.make(for: devMySQL)
-    // Databases are schemas: one connection lists them all.
+    // No database configured: every database is a section; picking one browses just that one.
     #expect(try await driver.listSchemas().map(\.name) == ["archive", "blog", "shop"])
+    #expect(try await driver.listDatabases() == ["archive", "blog", "shop"])
+    let shop = Drivers.make(for: devMySQL.withDatabase("shop"))
+    #expect(try await shop.listSchemas().map(\.name) == ["shop"])
+    #expect(try await shop.listDatabases() == ["archive", "blog", "shop"])
+    await shop.disconnect()
     let page = try await driver.fetchRows(of: TableInfo(schema: "shop", name: "orders"), limit: 10, offset: 0)
     #expect(page.rows.count == 10 && page.totalCount == 1200)
     #expect(page.rows[0].values[3] == .decimal("27.31"))

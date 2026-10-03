@@ -593,6 +593,15 @@ final class AppModel {
         guard let connection = selectedConnection, let target = selectedTarget else { schemas = .idle; return }
         schemas = .loading
         invalidateCompletionCatalog(for: target)
+        // No database configured (MySQL; Postgres falls back to `postgres`): open the server's
+        // first one, as if picked from the title menu, rather than listing every database at once.
+        if target.defaultDatabase.isEmpty, connection.showAllDatabases, connection.supportsMultipleDatabases {
+            if databaseLists[connection.id] == nil { await loadDatabases(connection) }
+            if let first = databaseLists[connection.id]?.first, connection.id == selectedConnectionID, selectedDatabase == nil {
+                select(connection.id, database: first)  // reloads through the tables column's task
+                return
+            }
+        }
         if databaseLists[connection.id] == nil {
             Task { await loadDatabases(connection) }
         }

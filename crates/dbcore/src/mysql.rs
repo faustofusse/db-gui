@@ -1,8 +1,10 @@
 //! MySQL / MariaDB driver (mysql_async + rustls).
 //!
-//! In MySQL a database *is* a schema, so a connection lists every database it can see as a
-//! schema section (or only the configured one when "show all databases" is off). Tables are
-//! always addressed as `` `db`.`table` ``, so one session serves them all.
+//! In MySQL a database *is* a schema. Like Postgres, a connection browses one database (its
+//! `database`, also the sessions' default, so scripts can use unqualified names); the others are
+//! listed by `list_databases` and opened as their own connection (`ConnectionConfig::with_database`).
+//! Without a configured database, every database is listed as a schema section instead.
+//! Tables are always addressed as `` `db`.`table` ``.
 //!
 //! Values come over the text protocol (`COM_QUERY`), exactly as the mysql client prints them;
 //! column metadata turns them into typed values (ints, floats, exact decimals, booleans).
@@ -123,10 +125,16 @@ impl MysqlDriver {
         }
     }
 
-    /// Databases shown as schemas: all visible ones, or only the configured one.
+    /// The database this connection browses; `None` = no database configured, list them all.
     fn only_database(&self) -> Option<&str> {
         let database = self.config.database.trim();
-        (!self.config.show_all_databases && !database.is_empty()).then_some(database)
+        (!database.is_empty()).then_some(database)
+    }
+
+    /// `schema_name not in (…system schemas…)`, for `column`.
+    fn user_databases(column: &str) -> String {
+        let system = SYSTEM_SCHEMAS.iter().map(|s| MYSQL.quote_literal(s)).collect::<Vec<_>>().join(", ");
+        format!("{column} not in ({system})")
     }
 }
 
@@ -191,17 +199,21 @@ impl Driver for MysqlDriver {
         self.browse.is_open() || self.query.is_open()
     }
 
+    /// Every user database on the server (system ones hidden), whichever one this connection browses.
     async fn list_databases(&self) -> Result<Vec<String>> {
-        Ok(self.list_schemas().await?.into_iter().map(|s| s.name).collect())
+        let sql = format!(
+            "select schema_name from information_schema.schemata where {} order by schema_name",
+            Self::user_databases("schema_name")
+        );
+        let mut lease = self.browse.lease(&self.config).await?;
+        let result = lease.conn().query::<String, _>(sql).await;
+        lease.check(result).map_err(|e| query_error(&e))
     }
 
     async fn list_schemas(&self) -> Result<Vec<Schema>> {
         let filter = match self.only_database() {
             Some(db) => format!("s.schema_name = {}", MYSQL.quote_literal(db)),
-            None => format!(
-                "s.schema_name not in ({})",
-                SYSTEM_SCHEMAS.iter().map(|s| MYSQL.quote_literal(s)).collect::<Vec<_>>().join(", ")
-            ),
+            None => Self::user_databases("s.schema_name"),
         };
         // Empty databases are listed too (left join), so they show up as empty sections.
         let sql = format!(
@@ -237,10 +249,7 @@ impl Driver for MysqlDriver {
     async fn list_columns(&self) -> Result<Vec<TableColumns>> {
         let filter = match self.only_database() {
             Some(db) => format!("table_schema = {}", MYSQL.quote_literal(db)),
-            None => format!(
-                "table_schema not in ({})",
-                SYSTEM_SCHEMAS.iter().map(|s| MYSQL.quote_literal(s)).collect::<Vec<_>>().join(", ")
-            ),
+            None => Self::user_databases("table_schema"),
         };
         let sql = format!(
             "select table_schema, table_name, column_name, column_type, is_nullable, column_key

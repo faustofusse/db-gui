@@ -58,9 +58,9 @@ public struct ConnectionConfig: Identifiable, Hashable, Sendable {
         self.summary = summary
     }
 
-    /// Sibling databases are listed under the connection in the sidebar, each with its own
-    /// session (Postgres). MySQL lists them as schemas instead; SQLite files have none.
-    public var supportsMultipleDatabases: Bool { kind == .postgres }
+    /// The server's other databases can be switched to (the tables column's title menu), each with
+    /// its own session (Postgres, MySQL). SQLite files have none.
+    public var supportsMultipleDatabases: Bool { kind == .postgres || kind == .mysql }
 }
 
 public enum TableKind: String, Sendable, Hashable {

@@ -155,9 +155,9 @@ struct ConnectionEditor: View {
             TextField("Database", text: $draft.database, prompt: Text(verbatim: databasePrompt))
             Toggle(isOn: $draft.showAllDatabases) {
                 Text("Show all databases")
-                Text(draft.supportsMultipleDatabases
-                     ? "List every database on the server in the sidebar. The one above opens by default."
-                     : "List every database on the server as a section. Otherwise only the one above.")
+                Text(draft.database.trimmingCharacters(in: .whitespaces).isEmpty && draft.kind == .mysql
+                     ? "Switch between the server's databases from the tables column's title. The first one opens."
+                     : "Switch between the server's databases from the tables column's title. The one above opens first.")
             }
         }
     }

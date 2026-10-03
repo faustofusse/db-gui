@@ -344,3 +344,20 @@ fn saves_row_edits_in_one_transaction() {
     exercise_edits(&conn, TableInfo::new("archive", "dbear_edit_test"));
     block_on(conn.execute("drop table archive.dbear_edit_test".into())).unwrap();
 }
+
+#[test]
+fn browses_one_database_and_lists_the_others() {
+    if !enabled() {
+        return;
+    }
+    let shop = Connection::new(dev_config().with_database("shop"));
+    let schemas = block_on(shop.list_schemas()).unwrap();
+    assert_eq!(schemas.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["shop"]);
+    assert_eq!(block_on(shop.list_databases()).unwrap(), ["archive", "blog", "shop"]);
+    let columns = block_on(shop.list_columns()).unwrap();
+    assert!(columns.iter().all(|t| t.schema == "shop"), "completion only sees this database");
+    // The database is the session's default: unqualified names work in scripts.
+    let count = block_on(shop.execute("select count(*) as n from customers".into())).unwrap();
+    assert_eq!(count.rows[0][0], Value::Int(250));
+    assert!(dev_config().supports_multiple_databases());
+}
