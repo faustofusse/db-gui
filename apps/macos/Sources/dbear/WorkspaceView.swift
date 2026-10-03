@@ -78,7 +78,10 @@ struct WorkspaceView: View {
             EmptyPlaceholder(text: "No Table Selected")
         } else {
             VStack(spacing: 0) {
-                TabStrip()
+                // Like Safari: no tab bar for a single tab (the toolbar still has New SQL Script, ⌘T).
+                if model.tabs.count > 1 {
+                    TabStrip()
+                }
                 Group {
                     switch model.activeTab {
                     case .table(let tab): TableTabView(tab: tab).id(tab.id)
