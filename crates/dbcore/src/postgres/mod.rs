@@ -5,7 +5,7 @@
 //! (or the catalog for table browsing), and are used to turn ints/floats/bools into typed
 //! values and NUMERIC into an exact `Value::Decimal`.
 
-mod tls;
+pub(crate) mod tls;
 
 use std::sync::Arc;
 use std::time::Duration;

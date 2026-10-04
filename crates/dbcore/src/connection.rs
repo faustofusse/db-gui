@@ -11,6 +11,7 @@ use crate::dialect::normalize_filter;
 use crate::edit::{self, EditStatement, RowChange};
 use crate::keyset::{PageCursor, RowPage};
 use crate::model::{ColumnInfo, ConnectionConfig, QueryResult, RowQuery, Schema, TableColumns, TableInfo, TableStructure};
+use crate::libsql::LibsqlDriver;
 use crate::mock::{self, MockDriver};
 use crate::model::DatabaseKind;
 use crate::mysql::MysqlDriver;
@@ -65,6 +66,7 @@ fn make_driver(config: ConnectionConfig) -> Arc<dyn Driver> {
         DatabaseKind::Postgres => Arc::new(PostgresDriver::new(config)),
         DatabaseKind::Mysql => Arc::new(MysqlDriver::new(config)),
         DatabaseKind::Sqlite => Arc::new(SqliteDriver::new(config)),
+        DatabaseKind::Libsql => Arc::new(LibsqlDriver::new(config)),
     }
 }
 

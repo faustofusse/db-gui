@@ -20,10 +20,12 @@ pub const DEV_DATABASE: &str = "local-pg";
 pub const DEV_MYSQL: &str = "local-mysql";
 /// The sample connection backed by the dev SQLite file (`scripts/dev-db.sh up sqlite`).
 pub const DEV_SQLITE: &str = "local-sqlite";
+/// The sample connection backed by the dev libSQL server (`scripts/dev-db.sh up libsql`).
+pub const DEV_LIBSQL: &str = "local-libsql";
 
 /// Sample connections served by [`MockDriver`] (everything except the dev databases).
 pub fn is_mock(config: &ConnectionConfig) -> bool {
-    ![DEV_DATABASE, DEV_MYSQL, DEV_SQLITE].contains(&config.id.as_str()) && connections().iter().any(|c| c.id == config.id)
+    ![DEV_DATABASE, DEV_MYSQL, DEV_SQLITE, DEV_LIBSQL].contains(&config.id.as_str()) && connections().iter().any(|c| c.id == config.id)
 }
 
 /// `dev/sqlite/app.db` in this checkout (sample connections are a development aid).
@@ -64,6 +66,13 @@ pub fn connections() -> Vec<ConnectionConfig> {
             ..conn(DEV_MYSQL, "mysql_dev", "Local", Mysql, "localhost", Some(33069), "", Some("root"))
         },
         conn(DEV_SQLITE, "app.db", "Local", Sqlite, "", None, &dev_sqlite_path(), None),
+        // Token from `dev/libsql/dev_token` (dev-only key pair).
+        ConnectionConfig {
+            password: Some(include_str!("../../../dev/libsql/dev_token").trim().into()),
+            ssl_mode: SslMode::Disable,
+            show_all_databases: false,
+            ..conn(DEV_LIBSQL, "libsql_dev", "Local", Libsql, "localhost", Some(18080), "", None)
+        },
         conn("staging-pg", "app_staging", "Staging", Postgres, "staging-db.internal", Some(5432), "app", Some("readonly")),
         conn("prod-pg", "app_production", "Production", Postgres, "prod-db.internal", Some(5432), "app", Some("readonly")),
         conn("prod-replica", "app_replica", "Production", Postgres, "replica-db.internal", Some(5432), "app", Some("readonly")),
@@ -157,7 +166,7 @@ fn specs(kind: DatabaseKind) -> &'static Specs {
     match kind {
         DatabaseKind::Postgres => postgres_specs(),
         DatabaseKind::Mysql => mysql_specs(),
-        DatabaseKind::Sqlite => sqlite_specs(),
+        DatabaseKind::Sqlite | DatabaseKind::Libsql => sqlite_specs(),
     }
 }
 
@@ -306,7 +315,7 @@ impl Driver for MockDriver {
         let mut names = match self.config.kind {
             DatabaseKind::Postgres => vec![format!("{db}_test"), db, "postgres".into()],
             DatabaseKind::Mysql => vec![db, "shop".into()],
-            DatabaseKind::Sqlite => vec![db],
+            DatabaseKind::Sqlite | DatabaseKind::Libsql => vec![db],
         };
         names.retain(|n| !n.is_empty());
         names.sort();
@@ -618,7 +627,7 @@ mod tests {
     #[test]
     fn only_the_dev_database_is_real() {
         let real: Vec<_> = connections().into_iter().filter(|c| !is_mock(c)).map(|c| c.id).collect();
-        assert_eq!(real, [DEV_DATABASE, DEV_MYSQL, DEV_SQLITE]);
+        assert_eq!(real, [DEV_DATABASE, DEV_MYSQL, DEV_SQLITE, DEV_LIBSQL]);
         assert!(format!("{:?}", connections()[0]).contains("password: Some(\"•••\")"));
     }
 
@@ -628,5 +637,6 @@ mod tests {
         assert_eq!(c[0].summary(), "PostgreSQL · localhost:54329/app_dev");
         assert_eq!(c[1].summary(), "MySQL · localhost:33069");
         assert!(c[2].summary().starts_with("SQLite · /") && c[2].summary().ends_with("dev/sqlite/app.db"));
+        assert_eq!(c[3].summary(), "Turso · localhost:18080");
     }
 }

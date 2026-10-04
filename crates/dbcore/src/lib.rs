@@ -13,6 +13,7 @@ pub mod edit;
 pub mod highlight;
 pub mod import;
 pub mod keyset;
+pub mod libsql;
 pub mod mock;
 pub mod model;
 pub mod mysql;

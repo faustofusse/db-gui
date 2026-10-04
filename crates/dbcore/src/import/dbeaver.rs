@@ -147,7 +147,7 @@ fn convert(id: &str, source: &Json, credentials: Option<&Credentials>, project: 
     let kind = match (provider, driver) {
         ("postgresql", _) => DatabaseKind::Postgres,
         ("mysql", _) => DatabaseKind::Mysql,
-        (_, d) if d.contains("libsql") => return Err("libSQL / Turso isn’t supported yet.".into()),
+        (_, d) if d.contains("libsql") => return convert_libsql(id, source, credentials, project),
         ("sqlite", _) => DatabaseKind::Sqlite,
         ("generic", d) if d.contains("sqlite") => DatabaseKind::Sqlite,
         (other, _) => return Err(format!("{} isn’t supported yet.", provider_display_name(other))),
@@ -186,7 +186,7 @@ fn convert(id: &str, source: &Json, credentials: Option<&Credentials>, project: 
         DatabaseKind::Postgres => provider_flag("@dbeaver-show-non-default-db@").unwrap_or(false),
         // …and every MySQL database by default.
         DatabaseKind::Mysql => provider_flag("@dbeaver-show-all-dbs@").unwrap_or(true),
-        DatabaseKind::Sqlite => false,
+        DatabaseKind::Sqlite | DatabaseKind::Libsql => false,
     };
     if config.name.is_empty() {
         config.name = config.default_name();
@@ -207,6 +207,56 @@ fn convert(id: &str, source: &Json, credentials: Option<&Credentials>, project: 
     }
     if kind != DatabaseKind::Sqlite && config.password.is_none() {
         warnings.push("No saved password.".into());
+    }
+    Ok(ImportedConnection { config, source_id: id.to_string(), warnings, already_added: false })
+}
+
+/// DBeaver's LibSQL driver (`libsql_jdbc`, Turso or sqld). The server URL is in the JDBC URL
+/// (`jdbc:dbeaver:libsql:https://…`) or the `server` field; the auth token is the saved password
+/// (its "LibSQL token" auth model has no user). A local file becomes a SQLite connection.
+fn convert_libsql(id: &str, source: &Json, credentials: Option<&Credentials>, project: Option<&str>) -> Result<ImportedConnection, String> {
+    let conf = &source["configuration"];
+    let text = |v: &Json| v.as_str().map(str::trim).filter(|s| !s.is_empty()).map(String::from);
+    let server = text(&conf["url"])
+        .map(|url| {
+            let url = url.strip_prefix("jdbc:").unwrap_or(&url);
+            let url = url.strip_prefix("dbeaver:").unwrap_or(url);
+            url.strip_prefix("libsql:").unwrap_or(url).to_string()
+        })
+        .filter(|url| !url.is_empty())
+        .or_else(|| text(&conf["server"]))
+        .or_else(|| text(&conf["host"]))
+        .or_else(|| text(&conf["database"]))
+        .ok_or("No server URL is set.")?;
+    let url = if server.contains("://") || server.starts_with("file:") {
+        server
+    } else if server.starts_with('/') || server.starts_with('~') {
+        format!("sqlite://{server}")
+    } else {
+        format!("https://{server}")
+    };
+    let mut config = ConnectionConfig::from_url(&url).map_err(|e| e.to_string())?;
+    if !matches!(config.kind, DatabaseKind::Libsql | DatabaseKind::Sqlite) {
+        return Err(format!("“{url}” isn’t a libSQL URL."));
+    }
+    config.name = text(&source["name"]).unwrap_or_else(|| config.default_name());
+    config.group = [project.map(String::from), text(&source["folder"])].into_iter().flatten().collect::<Vec<_>>().join(" / ");
+
+    let mut warnings = Vec::new();
+    if config.kind == DatabaseKind::Libsql {
+        if source["save-password"].as_bool() != Some(false) {
+            let saved = credentials.and_then(|c| c.password.clone()).or_else(|| text(&conf["password"]));
+            config.password = saved.or(config.password);
+        }
+        if config.password.is_none() {
+            warnings.push("No saved auth token.".into());
+        }
+    } else {
+        config.password = None;
+    }
+    let handlers = conf["handlers"].as_object();
+    if handlers.is_some_and(|h| h.iter().any(|(k, v)| (k == "ssh_tunnel" || k.contains("proxy")) && v["enabled"].as_bool() == Some(true))) {
+        warnings.push("Uses an SSH tunnel or proxy, which dbear doesn’t support yet.".into());
     }
     Ok(ImportedConnection { config, source_id: id.to_string(), warnings, already_added: false })
 }
@@ -264,7 +314,7 @@ fn ssl_mode(kind: DatabaseKind, conf: &Json) -> Option<SslMode> {
         DatabaseKind::Mysql => prop("sslMode")
             .and_then(|m| parse(&m))
             .or_else(|| (prop("useSSL").as_deref() == Some("false")).then_some(SslMode::Disable)),
-        DatabaseKind::Sqlite => None,
+        DatabaseKind::Sqlite | DatabaseKind::Libsql => None,
     }
 }
 
@@ -330,7 +380,13 @@ mod tests {
                     "provider": "sqlite", "driver": "sqlite_jdbc", "name": "Notes",
                     "configuration": {"url": "jdbc:sqlite:/Users/me/notes.db", "configurationType": "URL"}
                 },
-                "libsql_jdbc-5": {"provider": "sqlite", "driver": "libsql_jdbc", "name": "Turso", "configuration": {}},
+                "libsql_jdbc-5": {"provider": "sqlite", "driver": "libsql_jdbc", "name": "Turso", "save-password": true,
+                    "configuration": {"url": "jdbc:dbeaver:libsql:https://mydb-acme.turso.io", "configurationType": "URL", "auth-model": "libsql_token_jdbc"}},
+                "libsql_jdbc-8": {"provider": "sqlite", "driver": "libsql_jdbc",
+                    "configuration": {"server": "http://localhost:8080", "configurationType": "MANUAL"}},
+                "libsql_jdbc-9": {"provider": "sqlite", "driver": "libsql_jdbc", "name": "Replica file",
+                    "configuration": {"url": "jdbc:dbeaver:libsql:file:/Users/me/replica.db"}},
+                "libsql_jdbc-10": {"provider": "sqlite", "driver": "libsql_jdbc", "name": "Empty", "configuration": {}},
                 "azure-6": {"provider": "sqlserver", "driver": "azure", "name": "Azure", "configuration": {}},
                 "postgres-jdbc-7": {
                     "provider": "postgresql", "driver": "postgres-jdbc", "save-password": true,
@@ -355,6 +411,7 @@ mod tests {
             ("postgres-jdbc-1".to_string(), Credentials { user: Some("app".into()), password: Some("s3cret".into()) }),
             ("mysql8-2".to_string(), Credentials { user: Some("root".into()), password: Some("pw".into()) }),
             ("mariaDB-3".to_string(), Credentials { user: Some("old".into()), password: Some("ignored".into()) }),
+            ("libsql_jdbc-5".to_string(), Credentials { user: None, password: Some("eyJ.token".into()) }),
         ]);
         let scan = parse_data_sources(&sample(), &creds, None);
         let by_name = |n: &str| scan.connections.iter().find(|c| c.config.name == n).unwrap_or_else(|| panic!("{n}"));
@@ -380,8 +437,18 @@ mod tests {
         // Unnamed connections get the usual default name.
         assert!(!by_name("app").config.show_all_databases);
 
+        let turso = by_name("Turso");
+        assert_eq!((turso.config.kind, turso.config.host.as_str(), turso.config.ssl_mode), (DatabaseKind::Libsql, "mydb-acme.turso.io", SslMode::VerifyFull));
+        assert_eq!((turso.config.password.as_deref(), turso.config.user.as_deref()), (Some("eyJ.token"), None));
+        assert!(turso.warnings.is_empty(), "{:?}", turso.warnings);
+        let local = by_name("localhost");
+        assert_eq!((local.config.kind, local.config.port, local.config.ssl_mode), (DatabaseKind::Libsql, Some(8080), SslMode::Disable));
+        assert_eq!(local.warnings, ["No saved auth token."]);
+        let file = by_name("Replica file");
+        assert_eq!((file.config.kind, file.config.database.as_str()), (DatabaseKind::Sqlite, "/Users/me/replica.db"));
+
         let skipped: Vec<_> = scan.skipped.iter().map(|s| (s.name.as_str(), s.reason.as_str())).collect();
-        assert_eq!(skipped, [("Azure", "SQL Server isn’t supported yet."), ("Turso", "libSQL / Turso isn’t supported yet.")]);
+        assert_eq!(skipped, [("Azure", "SQL Server isn’t supported yet."), ("Empty", "No server URL is set.")]);
     }
 
     #[test]
@@ -393,7 +460,7 @@ mod tests {
         std::fs::write(dot.join("credentials-config.json"), encrypt(r##"{"postgres-jdbc-1":{"#connection":{"user":"app","password":"s3cret"}}}"##)).unwrap();
 
         let scan = scan_path(dir.path()).unwrap();
-        assert_eq!((scan.connections.len(), scan.skipped.len()), (5, 2));
+        assert_eq!((scan.connections.len(), scan.skipped.len()), (8, 2));
         let pg = scan.connections.iter().find(|c| c.config.name == "Billing").unwrap();
         assert_eq!((pg.config.password.as_deref(), pg.config.group.as_str()), (Some("s3cret"), "Work / prod"));
 

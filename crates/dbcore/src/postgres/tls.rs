@@ -13,7 +13,7 @@ use tokio_postgres_rustls::MakeRustlsConnect;
 use crate::driver::{Error, Result};
 use crate::model::SslMode;
 
-fn provider() -> Arc<CryptoProvider> {
+pub(crate) fn provider() -> Arc<CryptoProvider> {
     Arc::new(rustls::crypto::ring::default_provider())
 }
 
@@ -38,7 +38,7 @@ pub(super) fn connector(mode: SslMode) -> Result<MakeRustlsConnect> {
 /// Encrypts the connection without authenticating the server (libpq `sslmode=require`).
 /// Handshake signatures are still checked, so the session keys belong to the presented cert.
 #[derive(Debug)]
-struct AcceptAnyCert(Arc<CryptoProvider>);
+pub(crate) struct AcceptAnyCert(pub(crate) Arc<CryptoProvider>);
 
 impl ServerCertVerifier for AcceptAnyCert {
     fn verify_server_cert(

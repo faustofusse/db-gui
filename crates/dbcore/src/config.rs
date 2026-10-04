@@ -20,13 +20,14 @@ impl ConnectionConfig {
             name: String::new(),
             group: String::new(),
             kind,
-            host: if kind == DatabaseKind::Sqlite { String::new() } else { "localhost".into() },
+            host: if kind.is_sqlite_family() { String::new() } else { "localhost".into() },
             port: None,
             database: String::new(),
             user: None,
             password: None,
-            ssl_mode: SslMode::default(),
-            show_all_databases: kind != DatabaseKind::Sqlite,
+            // Turso is always reached over the internet: verify its certificate by default.
+            ssl_mode: if kind == DatabaseKind::Libsql { SslMode::VerifyFull } else { SslMode::default() },
+            show_all_databases: !kind.is_sqlite_family(),
         }
     }
 
@@ -40,6 +41,9 @@ impl ConnectionConfig {
             }
             return Ok(());
         }
+        if self.kind == DatabaseKind::Libsql {
+            return crate::libsql::url::validate(self);
+        }
         if self.host.trim().is_empty() {
             return invalid("Enter a host.");
         }
@@ -49,7 +53,8 @@ impl ConnectionConfig {
         Ok(())
     }
 
-    /// Parses `postgres://user:pass@host:5432/db?sslmode=require`, `mysql://…` or `sqlite:///path/file.db`.
+    /// Parses `postgres://user:pass@host:5432/db?sslmode=require`, `mysql://…`, `sqlite:///path/file.db`
+    /// or a Turso / libSQL URL (`libsql://db-org.turso.io?authToken=…`, `https://…`, `http://localhost:8080`).
     /// The name defaults to [`ConnectionConfig::default_name`]; id and group are left empty.
     pub fn from_url(input: &str) -> Result<Self> {
         let invalid = |msg: String| Error::InvalidConfig(msg);
@@ -58,6 +63,7 @@ impl ConnectionConfig {
             "postgres" | "postgresql" => DatabaseKind::Postgres,
             "mysql" | "mariadb" => DatabaseKind::Mysql,
             "sqlite" | "file" => DatabaseKind::Sqlite,
+            "libsql" | "http" | "https" | "ws" | "wss" => return crate::libsql::url::from_url(&url),
             other => return Err(invalid(format!("Unsupported URL scheme “{other}”."))),
         };
         let decode = |s: &str| percent_decode_str(s).decode_utf8_lossy().into_owned();
@@ -93,6 +99,9 @@ impl ConnectionConfig {
     pub fn to_url(&self, include_password: bool) -> String {
         if self.kind == DatabaseKind::Sqlite {
             return format!("sqlite://{}", self.database);
+        }
+        if self.kind == DatabaseKind::Libsql {
+            return crate::libsql::url::to_url(self, include_password);
         }
         let scheme = if self.kind == DatabaseKind::Postgres { "postgres" } else { "mysql" };
         let enc = |s: &str| utf8_percent_encode(s, USERINFO).to_string();

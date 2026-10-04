@@ -12,7 +12,7 @@ impl Dialect {
     pub fn quote_ident(self, name: &str) -> String {
         match self.0 {
             DatabaseKind::Mysql => format!("`{}`", name.replace('`', "``")),
-            DatabaseKind::Postgres | DatabaseKind::Sqlite => format!("\"{}\"", name.replace('"', "\"\"")),
+            DatabaseKind::Postgres | DatabaseKind::Sqlite | DatabaseKind::Libsql => format!("\"{}\"", name.replace('"', "\"\"")),
         }
     }
 
@@ -26,7 +26,7 @@ impl Dialect {
         match self.0 {
             // Backslash is an escape character in MySQL strings (unless NO_BACKSLASH_ESCAPES).
             DatabaseKind::Mysql => format!("'{}'", value.replace('\\', "\\\\").replace('\'', "''")),
-            DatabaseKind::Postgres | DatabaseKind::Sqlite => format!("'{}'", value.replace('\'', "''")),
+            DatabaseKind::Postgres | DatabaseKind::Sqlite | DatabaseKind::Libsql => format!("'{}'", value.replace('\'', "''")),
         }
     }
 

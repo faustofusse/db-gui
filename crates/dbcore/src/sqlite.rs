@@ -635,7 +635,7 @@ fn run_script(conn: &rusqlite::Connection, sql: &str, max_rows: Option<u32>) -> 
 }
 
 /// SQLite values are dynamically typed; the declared column type refines booleans and decimals.
-fn decode(value: ValueRef<'_>, declared: &str) -> Value {
+pub(crate) fn decode(value: ValueRef<'_>, declared: &str) -> Value {
     match value {
         ValueRef::Null => Value::Null,
         ValueRef::Integer(i) if declared.contains("bool") => Value::Bool(i != 0),

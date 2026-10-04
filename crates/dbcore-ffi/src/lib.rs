@@ -17,6 +17,8 @@ pub enum DatabaseKind {
     Postgres,
     Mysql,
     Sqlite,
+    /// Turso / libSQL (shown as "Turso").
+    Libsql,
 }
 
 #[derive(uniffi::Enum, Clone, Copy)]
@@ -592,6 +594,7 @@ impl From<DatabaseKind> for dbcore::DatabaseKind {
             DatabaseKind::Postgres => Self::Postgres,
             DatabaseKind::Mysql => Self::Mysql,
             DatabaseKind::Sqlite => Self::Sqlite,
+            DatabaseKind::Libsql => Self::Libsql,
         }
     }
 }
@@ -602,6 +605,7 @@ impl From<dbcore::DatabaseKind> for DatabaseKind {
             dbcore::DatabaseKind::Postgres => Self::Postgres,
             dbcore::DatabaseKind::Mysql => Self::Mysql,
             dbcore::DatabaseKind::Sqlite => Self::Sqlite,
+            dbcore::DatabaseKind::Libsql => Self::Libsql,
         }
     }
 }

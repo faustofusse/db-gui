@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Local databases for development and integration tests (Apple `container` CLI for servers).
-#   scripts/dev-db.sh up    [postgres|mysql|sqlite]   start / create (seeds on first boot); default: all
-#   scripts/dev-db.sh down  [postgres|mysql|sqlite]   stop and delete (data is discarded)
-#   scripts/dev-db.sh reset [postgres|mysql|sqlite]   down + up
+#   scripts/dev-db.sh up    [postgres|mysql|sqlite|libsql]   start / create (seeds on first boot); default: all
+#   scripts/dev-db.sh down  [postgres|mysql|sqlite|libsql]   stop and delete (data is discarded)
+#   scripts/dev-db.sh reset [postgres|mysql|sqlite|libsql]   down + up
 #   scripts/dev-db.sh shell  postgres|mysql|sqlite    open psql / mysql / sqlite3
 #   scripts/dev-db.sh logs   postgres|mysql           container logs
 #
@@ -10,12 +10,14 @@
 #   postgres://postgres:postgres@localhost:54329/app_dev
 #   mysql://root:mysql@localhost:33069
 #   sqlite://$PWD/dev/sqlite/app.db
+#   libsql://localhost:18080?tls=0&authToken=$(cat dev/libsql/dev_token)   (Turso's sqld, seeded like SQLite)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 PG_NAME=dbear-postgres PG_IMAGE=postgres:17 PG_PORT=54329
 MY_NAME=dbear-mysql MY_IMAGE=mysql:8.4 MY_PORT=33069
 SQLITE_FILE=dev/sqlite/app.db
+LIBSQL_NAME=dbear-libsql LIBSQL_IMAGE=ghcr.io/tursodatabase/libsql-server:latest LIBSQL_PORT=18080
 
 wait_for() { # name, ready-check command, seed-error pattern, url
   local name=$1 check=$2 error_pattern=$3 url=$4
@@ -86,18 +88,42 @@ up_sqlite() {
   echo "sqlite://$PWD/$SQLITE_FILE"
 }
 
+libsql_post() { # endpoint, JSON body
+  curl -sf -H "Authorization: Bearer $(cat dev/libsql/dev_token)" -H 'Content-Type: application/json' \
+    --data-binary "$2" "http://127.0.0.1:$LIBSQL_PORT/$1"
+}
+
+up_libsql() {
+  start_container "$LIBSQL_NAME" \
+    -e SQLD_NODE=primary -e SQLD_HTTP_LISTEN_ADDR=0.0.0.0:8080 \
+    -e "SQLD_AUTH_JWT_KEY=$(cat dev/libsql/jwt_public_key)" \
+    -p "127.0.0.1:$LIBSQL_PORT:8080" \
+    "$LIBSQL_IMAGE"
+  wait_for "$LIBSQL_NAME" "curl -sf http://127.0.0.1:$LIBSQL_PORT/v3 >/dev/null" '^$NEVER' \
+    "libsql://localhost:$LIBSQL_PORT?tls=0 (token: dev/libsql/dev_token)"
+  # Seed once with the SQLite seed (the JSON body is built by sqlite3 so the SQL is escaped right).
+  if ! libsql_post v3/pipeline '{"requests":[{"type":"execute","stmt":{"sql":"select 1 from notes limit 1"}}]}' | grep -q '"type":"ok","response"'; then
+    command -v sqlite3 >/dev/null || { echo 'sqlite3 not found (nix develop provides it)' >&2; return 1; }
+    local body
+    body=$(sqlite3 :memory: "select json_object('requests', json_array(json_object('type', 'sequence', 'sql', cast(readfile('dev/sqlite/init.sql') as text)), json_object('type', 'close')))")
+    libsql_post v3/pipeline "$body" | grep -q '"type":"error"' && { echo 'libsql seed failed' >&2; return 1; }
+  fi
+  return 0
+}
+
 for_each() { # action, target
   local action=$1 target=${2:-all}
   case "$target" in
-    postgres|mysql|sqlite) "${action}_$target" ;;
-    all) "${action}_postgres"; "${action}_mysql"; "${action}_sqlite" ;;
-    *) echo "unknown database: $target (postgres|mysql|sqlite)" >&2; exit 2 ;;
+    postgres|mysql|sqlite|libsql) "${action}_$target" ;;
+    all) "${action}_postgres"; "${action}_mysql"; "${action}_sqlite"; "${action}_libsql" ;;
+    *) echo "unknown database: $target (postgres|mysql|sqlite|libsql)" >&2; exit 2 ;;
   esac
 }
 
 down_postgres() { remove_container "$PG_NAME"; }
 down_mysql() { remove_container "$MY_NAME"; }
 down_sqlite() { rm -f "$SQLITE_FILE"; }
+down_libsql() { remove_container "$LIBSQL_NAME"; }
 
 case "${1:-up}" in
   up) for_each up "${2:-}" ;;
@@ -109,6 +135,11 @@ case "${1:-up}" in
       mysql) container exec -it "$MY_NAME" mysql -uroot -pmysql ;;
       sqlite) sqlite3 "$SQLITE_FILE" ;;
     esac ;;
-  logs) if [ "${2:-postgres}" = mysql ]; then container logs "$MY_NAME"; else container logs "$PG_NAME"; fi ;;
-  *) echo "usage: $0 up|down|reset|shell|logs [postgres|mysql|sqlite]" >&2; exit 2 ;;
+  logs)
+    case "${2:-postgres}" in
+      mysql) container logs "$MY_NAME" ;;
+      libsql) container logs "$LIBSQL_NAME" ;;
+      *) container logs "$PG_NAME" ;;
+    esac ;;
+  *) echo "usage: $0 up|down|reset|shell|logs [postgres|mysql|sqlite|libsql]" >&2; exit 2 ;;
 esac

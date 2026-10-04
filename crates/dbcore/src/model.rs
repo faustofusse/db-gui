@@ -8,6 +8,8 @@ pub enum DatabaseKind {
     Postgres,
     Mysql,
     Sqlite,
+    /// Turso / libSQL server (`sqld`) over Hrana HTTP; SQLite-compatible SQL.
+    Libsql,
 }
 
 impl DatabaseKind {
@@ -16,6 +18,7 @@ impl DatabaseKind {
             Self::Postgres => "PostgreSQL",
             Self::Mysql => "MySQL",
             Self::Sqlite => "SQLite",
+            Self::Libsql => "Turso",
         }
     }
 
@@ -24,8 +27,13 @@ impl DatabaseKind {
         match self {
             Self::Postgres => Some(5432),
             Self::Mysql => Some(3306),
-            Self::Sqlite => None,
+            Self::Sqlite | Self::Libsql => None,
         }
+    }
+
+    /// Speaks SQLite's SQL (quoting, catalog, editing rules): SQLite files and Turso / libSQL.
+    pub fn is_sqlite_family(self) -> bool {
+        matches!(self, Self::Sqlite | Self::Libsql)
     }
 }
 
@@ -108,6 +116,8 @@ impl ConnectionConfig {
         let host = self.host.trim();
         match self.kind {
             DatabaseKind::Sqlite => database.rsplit('/').next().unwrap_or_default().to_string(),
+            // `mydb-org.aws-us-east-1.turso.io` → `mydb-org`.
+            DatabaseKind::Libsql => host.split('.').next().unwrap_or_default().to_string(),
             _ if !database.is_empty() => database.to_string(),
             _ => host.to_string(),
         }
@@ -118,6 +128,12 @@ impl ConnectionConfig {
         let kind = self.kind.display_name();
         if self.kind == DatabaseKind::Sqlite {
             return format!("{kind} · {}", self.database);
+        }
+        if self.kind == DatabaseKind::Libsql {
+            return match self.port {
+                Some(port) => format!("{kind} · {}:{port}", self.host),
+                None => format!("{kind} · {}", self.host),
+            };
         }
         let address = match self.port {
             Some(port) => format!("{}:{port}", self.host),

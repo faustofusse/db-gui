@@ -54,6 +54,7 @@ scripts/            build, bundle, dev database, tests
 ```sh
 cargo test -p dbcore              # core (Postgres tests skip without a database)
 ./scripts/test-postgres.sh        # core against the dev database
+./scripts/test-libsql.sh          # core against the dev libSQL server (container dbear-libsql)
 (cd apps/macos && swift test)     # Swift ⇄ Rust bridge
 ```
 
@@ -85,5 +86,11 @@ cargo test -p dbcore              # core (Postgres tests skip without a database
   UPDATE/DELETE doesn't match exactly one row (the row changed since it was loaded). Values
   are sent as string literals and cast by the database. Views, keyless tables and binary
   columns are read-only.
+- Turso / libSQL connections (`libsql://db-org.turso.io?authToken=…`) speak Hrana 3 over HTTP
+  (`dbcore::libsql`, reqwest + rustls/ring, no libSQL C library). The auth token is stored in the
+  keychain like a password. Each call runs on its own short-lived stream, so a transaction a script
+  leaves open is rolled back when that script ends. Row counts are never computed, because Turso bills
+  rows read. Cancel stops the request, but a statement already running on the server can still finish.
+  Local libSQL files are SQLite files: open them as SQLite.
 - `bundle-mac.sh` signs with your "Apple Development" identity when you have one, so the
   Keychain's "Always Allow" survives rebuilds.

@@ -33,6 +33,10 @@ uuid = { version = "1", features = ["v4"] }
 url = "2"
 percent-encoding = "2"
 tempfile = "3"
+# Turso / libSQL over Hrana HTTP. 0.12: its rustls features use ring (0.13 defaults to aws-lc);
+# `-no-provider` because the driver passes its own ring-based rustls config.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots-no-provider", "http2"] }
+base64 = "0.22"
 # SQL syntax highlighting (grammar: github.com/DerekStride/tree-sitter-sql)
 tree-sitter = "0.27"
 tree-sitter-sequel = "0.3"

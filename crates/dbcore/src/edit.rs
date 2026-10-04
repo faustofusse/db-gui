@@ -97,7 +97,7 @@ pub fn statements(kind: DatabaseKind, table: &TableInfo, columns: &[ColumnInfo],
                     .map(|e| {
                         let c = column(&e.column)?;
                         let value = match &e.value {
-                            EditValue::Default if kind == DatabaseKind::Sqlite => {
+                            EditValue::Default if kind.is_sqlite_family() => {
                                 return Err(Error::Unsupported("SQLite can’t reset a column to its default in an UPDATE".into()));
                             }
                             EditValue::Default => "DEFAULT".to_string(),
@@ -163,7 +163,7 @@ fn is_boolean(kind: DatabaseKind, column: &ColumnInfo) -> bool {
     match kind {
         DatabaseKind::Postgres => false,
         DatabaseKind::Mysql => t == "tinyint(1)" || t == "boolean" || t == "bool",
-        DatabaseKind::Sqlite => t.contains("bool"),
+        DatabaseKind::Sqlite | DatabaseKind::Libsql => t.contains("bool"),
     }
 }
 
