@@ -4,7 +4,8 @@
 //!
 //! SQLite always runs (temp file). Postgres and MySQL run with `DBEAR_TEST_POSTGRES=1` /
 //! `DBEAR_TEST_MYSQL=1` against the dev databases, in a scratch `dbear_keyset` schema/database
-//! that is dropped afterwards.
+//! that is dropped afterwards. Turso / libSQL runs with `DBEAR_TEST_LIBSQL=1` against the dev
+//! libSQL server, in `dbear_keyset_*` tables that are dropped afterwards.
 
 use dbcore::{mock, Connection, ConnectionConfig, DatabaseKind, PageCursor, RowQuery, SortKey, TableInfo, Value};
 
@@ -32,7 +33,9 @@ fn page_all(conn: &Connection, table: &TableInfo, query: &RowQuery) -> (Vec<Vec<
         let page = block_on(conn.fetch_page(table.clone(), query.clone(), PAGE, after.clone())).unwrap();
         assert!(page.result.rows.len() <= PAGE as usize);
         if after.is_none() {
-            assert!(page.result.total_count.is_some() || table.kind == dbcore::TableKind::View);
+            // Turso never counts (rows read are billed).
+            let counts = conn.config().kind != DatabaseKind::Libsql;
+            assert!(page.result.total_count.is_some() == counts || table.kind == dbcore::TableKind::View);
         } else {
             assert_eq!(page.result.total_count, None);
         }
@@ -256,4 +259,50 @@ fn mysql_keyset_matches_offset() {
     check_table(&conn, &t("heap"), &SORT_COLUMNS, false, |_| false);
 
     block_on(conn.execute("drop database dbear_keyset".into())).unwrap();
+}
+
+// MARK: Turso / libSQL
+
+#[test]
+fn libsql_keyset_matches_offset() {
+    if !env_on("DBEAR_TEST_LIBSQL") {
+        return;
+    }
+    let config = mock::connections().into_iter().find(|c| c.id == mock::DEV_LIBSQL).unwrap();
+    let conn = Connection::new(config);
+    let values = data_rows(|hex| format!("X'{hex}'"), |k| format!("{k} / 3.0")).join(", ");
+    // Same tables as the SQLite test (the server is SQLite), prefixed: there's one shared database.
+    let names = ["main_t", "pair", "loose", "strict_t", "mixed", "shadow"];
+    let drop_all = || {
+        let drops: Vec<String> = names.iter().map(|n| format!("drop table if exists dbear_keyset_{n};")).collect();
+        block_on(conn.execute(format!("drop view if exists dbear_keyset_v; {}", drops.join(" ")))).unwrap();
+    };
+    drop_all();
+    block_on(conn.execute(format!(
+        "create table dbear_keyset_main_t (id integer primary key, a int, b text, c text, d numeric, e real, g blob);
+         insert into dbear_keyset_main_t values {values};
+         create table dbear_keyset_pair (x int, y text, a int, b text, c text, d numeric, e real, g blob, primary key (x, y));
+         insert into dbear_keyset_pair select id % 5, 'k' || id, a, b, c, d, e, g from dbear_keyset_main_t;
+         create table dbear_keyset_loose (k text primary key, a int, b text, c text, d numeric, e real, g blob);
+         insert into dbear_keyset_loose select case when id % 10 = 0 then null else 'k' || id end, a, b, c, d, e, g from dbear_keyset_main_t;
+         create table dbear_keyset_strict_t (k text primary key, a int, b text, c text, d numeric, e real, g blob) without rowid;
+         insert into dbear_keyset_strict_t select 'k' || id, a, b, c, d, e, g from dbear_keyset_main_t;
+         create table dbear_keyset_mixed (id integer primary key, a, b, c, d, e, g);
+         insert into dbear_keyset_mixed select id, case when id % 3 = 0 then 'text' || a when id % 3 = 1 then a * 1.5 else a end, b, c, d, e, g from dbear_keyset_main_t;
+         create table dbear_keyset_shadow (rowid_ text, \"rowid\" int, a int, b text, c text, d numeric, e real, g blob);
+         insert into dbear_keyset_shadow select 'r', id, a, b, c, d, e, g from dbear_keyset_main_t;
+         create view dbear_keyset_v as select * from dbear_keyset_main_t;"
+    )))
+    .unwrap();
+
+    let t = |name: &str| TableInfo::new("main", format!("dbear_keyset_{name}"));
+    for name in ["main_t", "pair", "loose", "strict_t", "mixed"] {
+        check_table(&conn, &t(name), &SORT_COLUMNS, true, |_| true);
+    }
+    check_table(&conn, &t("shadow"), &SORT_COLUMNS, true, |_| false);
+    let mut view = t("v");
+    view.kind = dbcore::TableKind::View;
+    check_table(&conn, &view, &SORT_COLUMNS, false, |_| false);
+
+    drop_all();
 }

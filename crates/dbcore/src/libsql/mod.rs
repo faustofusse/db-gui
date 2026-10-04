@@ -9,6 +9,8 @@
 //!   counted.
 //! - No row counts (`total_count`, `estimated_row_count`): Turso bills rows read and `count(*)`
 //!   reads the whole table.
+//! - Keyset paging (`fetch_page`) uses the SQLite driver's order (`rowid` or the primary key as
+//!   tiebreak), with cursor values sent back as typed Hrana arguments.
 //! - `cancel` drops the request, which stops a streaming cursor on the server, but Hrana can't
 //!   interrupt a statement that's still running there.
 //!
@@ -28,9 +30,10 @@ use tokio::sync::Notify;
 use crate::dialect::line_column;
 use crate::driver::{Driver, Error, Result};
 use crate::edit::{self, EditStatement};
+use crate::keyset::{page_sql, CursorValue, PageCursor, RowPage, Start};
 use crate::model::*;
 use catalog::SQLITE;
-use hrana::{Batch, BatchResult, Client, CursorEntry, HranaError, Stmt, StmtResult, Stream, StreamRequest, StreamResponse, StreamResult};
+use hrana::{Arg, HValue, Batch, BatchResult, Client, CursorEntry, HranaError, Stmt, StmtResult, Stream, StreamRequest, StreamResponse, StreamResult};
 
 pub struct LibsqlDriver {
     config: ConnectionConfig,
@@ -156,14 +159,69 @@ impl Driver for LibsqlDriver {
     async fn fetch_rows(&self, table: &TableInfo, query: &RowQuery, limit: u32, offset: u64) -> Result<QueryResult> {
         let meta = self.meta(table).await?;
         let relation = SQLITE.quote_relation(&table.schema, &table.name);
-        let order_by = SQLITE.order_by(&query.sort, &meta.columns, &catalog::tiebreak(&meta))?;
-        let sql = SQLITE.page_query(&relation, query.filter.as_deref(), &order_by, limit, offset);
+        // Same order as `fetch_page`, so OFFSET and keyset pages agree.
+        let keyset = catalog::keyset_for(&meta, table, query)?;
+        let sql = page_sql(&relation, &[], query.filter.as_deref(), None, &keyset.order_by(), u64::from(limit), offset);
         // Errors leave out positions: they'd point into the generated query, not at the user's filter.
         let page = self.run_one(Stmt::new(sql)).await?;
         // `total_count` stays `None`, even on the first page: Turso bills every row read, and
         // `count(*)` reads the whole table (or every match of the filter). The grid pages until a
         // short page instead.
         Ok(QueryResult { rows: catalog::decode_rows(&page, &meta.columns), columns: meta.columns, ..Default::default() })
+    }
+
+    /// Like `fetch_rows`, but seeks past the cursor's last row (sent back as arguments) when the
+    /// table has a usable row id or key, as the SQLite driver does. Never counts rows (see above).
+    async fn fetch_page(&self, table: &TableInfo, query: &RowQuery, limit: u32, after: Option<&PageCursor>) -> Result<RowPage> {
+        let meta = self.meta(table).await?;
+        let relation = SQLITE.quote_relation(&table.schema, &table.name);
+        let keyset = catalog::keyset_for(&meta, table, query)?;
+        let filter = query.filter.as_deref();
+        let width = meta.columns.len();
+        let extra: Vec<String> = keyset.columns.iter().filter(|c| c.index >= width).map(|c| c.expr.clone()).collect();
+
+        // `?N` is the N-th sort term, however often the predicate repeats it.
+        let mut args: Vec<Arg> = Vec::new();
+        let start = keyset.start(after, |i, v| match v {
+            // JSON has no infinities; SQLite reads these literals as ±Inf.
+            CursorValue::Float(bits) if !f64::from_bits(*bits).is_finite() => {
+                if f64::from_bits(*bits) > 0.0 { "9e999".into() } else { "-9e999".into() }
+            }
+            v => {
+                if args.len() <= i {
+                    args.resize(i + 1, Arg::Null);
+                }
+                args[i] = Arg::from_cursor(v);
+                format!("?{}", i + 1)
+            }
+        });
+        let (segments, offset) = match start {
+            Start::Offset(n) => (vec![None], n),
+            Start::Seek(segments) => (segments.into_iter().map(Some).collect(), 0),
+            Start::Empty => {
+                let result = QueryResult { columns: meta.columns, ..Default::default() };
+                return Ok(RowPage { result, next: None });
+            }
+        };
+        let (mut rows, mut keys) = (Vec::new(), Vec::new());
+        let want = limit as usize + 1;
+        let key_indexes = keyset.key_indexes();
+        for seek in segments {
+            let need = want.saturating_sub(rows.len()) as u64;
+            if need == 0 {
+                break;
+            }
+            // The server wants exactly as many arguments as the statement's highest `?N`, and a
+            // segment may not use every key: mention the last one in an always-true term.
+            let seek = seek.map(|s| if args.is_empty() { s } else { format!("({s}) and ?{n} is ?{n}", n = args.len()) });
+            let sql = page_sql(&relation, &extra, filter, seek.as_deref(), &keyset.order_by(), need, offset);
+            let args = if seek.is_some() { args.clone() } else { Vec::new() };
+            let part = self.run_one(Stmt { args, ..Stmt::new(sql) }).await?;
+            keys.extend(part.rows.iter().map(|row| key_indexes.iter().map(|&i| row.get(i).map_or(CursorValue::Null, HValue::to_cursor)).collect()));
+            rows.extend(catalog::decode_rows(&part, &meta.columns));
+        }
+        let result = QueryResult { rows, columns: meta.columns, ..Default::default() };
+        Ok(keyset.finish(result, keys, width, limit, after))
     }
 
     async fn describe_table(&self, table: &TableInfo) -> Result<TableStructure> {

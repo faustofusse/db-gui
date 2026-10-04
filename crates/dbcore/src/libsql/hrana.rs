@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::dialect::error_chain;
 use crate::driver::{Error, Result};
+use crate::keyset::CursorValue;
 use crate::model::{ConnectionConfig, SslMode, Value};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -53,7 +54,25 @@ impl Stmt {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum Arg {
+    Null,
+    Integer { value: String },
+    Float { value: f64 },
     Text { value: String },
+    Blob { base64: String },
+}
+
+impl Arg {
+    /// A keyset cursor value, sent back with its storage class. Non-finite floats can't be
+    /// sent as JSON: the caller writes those as literals instead.
+    pub fn from_cursor(value: &CursorValue) -> Self {
+        match value {
+            CursorValue::Null => Self::Null,
+            CursorValue::Int(i) => Self::Integer { value: i.to_string() },
+            CursorValue::Float(bits) => Self::Float { value: f64::from_bits(*bits) },
+            CursorValue::Text(t) => Self::Text { value: t.clone() },
+            CursorValue::Bytes(b) => Self::Blob { base64: BASE64.encode(b) },
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -205,6 +224,17 @@ impl HValue {
                 let bytes = BASE64.decode(base64.trim()).unwrap_or_default();
                 crate::sqlite::decode(ValueRef::Blob(&bytes), declared)
             }
+        }
+    }
+
+    /// The exact value (storage class included) of a sort key, for the next page's seek.
+    pub fn to_cursor(&self) -> CursorValue {
+        match self {
+            Self::Null => CursorValue::Null,
+            Self::Integer { value } => value.parse().map_or_else(|_| CursorValue::Text(value.clone()), CursorValue::Int),
+            Self::Float { value } => CursorValue::float(*value),
+            Self::Text { value } => CursorValue::Text(value.clone()),
+            Self::Blob { base64 } => CursorValue::Bytes(BASE64.decode(base64.trim()).unwrap_or_default()),
         }
     }
 
@@ -536,6 +566,21 @@ mod tests {
         assert!(matches!(&entries[1], CursorEntry::Row { row } if row[0].as_text().as_deref() == Some("a")));
         assert!(matches!(entries[4], CursorEntry::Other));
         assert!(matches!(&entries[3], CursorEntry::StepError { error, .. } if matches!(error.clone().into_error(), Error::Cancelled)));
+    }
+
+    #[test]
+    fn round_trips_cursor_values() {
+        for value in [
+            CursorValue::Null,
+            CursorValue::Int(i64::MIN),
+            CursorValue::float(1.0 / 3.0),
+            CursorValue::Text("é".into()),
+            CursorValue::Bytes(vec![0, 255, 7]),
+        ] {
+            let json = serde_json::to_value(Arg::from_cursor(&value)).unwrap();
+            let back: HValue = serde_json::from_value(json).unwrap();
+            assert_eq!(back.to_cursor(), value);
+        }
     }
 
     #[test]

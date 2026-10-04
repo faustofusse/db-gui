@@ -5,6 +5,7 @@
 use super::hrana::{HValue, Stmt, StmtResult};
 use crate::dialect::Dialect;
 use crate::driver::{Error, Result};
+use crate::keyset::{Keyset, SeekColumn};
 use crate::model::*;
 
 pub(crate) const SQLITE: Dialect = Dialect(DatabaseKind::Libsql);
@@ -80,6 +81,8 @@ pub(crate) struct TableMeta {
     /// Primary key columns in key order.
     pub primary_key: Vec<String>,
     pub without_rowid: bool,
+    /// Columns declared NOT NULL (primary key columns are reported non-nullable regardless).
+    pub not_null: Vec<String>,
 }
 
 pub(crate) fn table_meta(table: &TableInfo, master: StmtResult, info: StmtResult) -> Result<TableMeta> {
@@ -90,12 +93,16 @@ pub(crate) fn table_meta(table: &TableInfo, master: StmtResult, info: StmtResult
     let mut columns = Vec::new();
     let mut defaults = Vec::new();
     let mut keyed = Vec::new();
+    let mut not_null = Vec::new();
     for row in info.rows {
         let text = |i: usize| row.get(i).and_then(HValue::as_text);
         let int = |i: usize| row.get(i).and_then(HValue::as_i64).unwrap_or(0);
         let (name, pk) = (text(0).unwrap_or_default(), int(3));
         if pk > 0 {
             keyed.push((pk, name.clone()));
+        }
+        if int(2) != 0 {
+            not_null.push(name.clone());
         }
         columns.push(ColumnInfo {
             name,
@@ -112,17 +119,37 @@ pub(crate) fn table_meta(table: &TableInfo, master: StmtResult, info: StmtResult
         defaults,
         primary_key: keyed.into_iter().map(|(_, name)| name).collect(),
         without_rowid: ddl.to_ascii_lowercase().contains("without rowid"),
+        not_null,
     })
 }
 
-/// `ORDER BY` tiebreak for stable pages: `rowid` unless the table has a single-column primary key
-/// (or no rowid at all); nothing for views.
-pub(crate) fn tiebreak(meta: &TableMeta) -> Vec<String> {
-    match meta.kind {
-        TableKind::Table if !meta.without_rowid && meta.primary_key.len() != 1 => vec!["rowid".into()],
-        TableKind::Table => meta.primary_key.iter().map(|c| SQLITE.quote_ident(c)).collect(),
-        TableKind::View => Vec::new(),
+/// The order of a table's pages, as in the SQLite driver: the user's sort, then `rowid` (insertion
+/// order for most tables and always indexed) or the primary key. Seeking needs that tiebreak to be
+/// unique and not shadowed by a column of the same name; views always page with OFFSET.
+pub(crate) fn keyset_for(meta: &TableMeta, table: &TableInfo, query: &RowQuery) -> Result<Keyset> {
+    let width = meta.columns.len();
+    let shadowed = meta.columns.iter().any(|c| ["rowid", "_rowid_", "oid"].iter().any(|r| c.name.eq_ignore_ascii_case(r)));
+    let key_columns = || meta.primary_key.iter().filter_map(|c| SeekColumn::column(SQLITE, &meta.columns, c));
+    let (tiebreak, enabled): (Vec<SeekColumn>, bool) = match meta.kind {
+        TableKind::Table if !meta.without_rowid && meta.primary_key.len() != 1 => (vec![SeekColumn::row_id("rowid", width)], !shadowed),
+        // A lone INTEGER PRIMARY KEY is the rowid itself. Other single keys can hold NULLs (an old
+        // SQLite quirk), so `rowid` goes after them to keep the order unique.
+        TableKind::Table if !meta.without_rowid && !meta.columns.iter().any(|c| c.is_primary_key && c.type_name == "integer") => {
+            let mut keys: Vec<SeekColumn> = key_columns().map(|c| SeekColumn { nullable: true, ..c }).collect();
+            keys.push(SeekColumn::row_id("rowid", width));
+            (keys, !shadowed)
+        }
+        TableKind::Table => (key_columns().collect(), true),
+        TableKind::View => (Vec::new(), false),
+    };
+    // Keys declared without NOT NULL may hold NULLs in SQLite: say so, so seeks handle them.
+    let mut columns = meta.columns.clone();
+    for c in &mut columns {
+        if c.is_primary_key && meta.kind == TableKind::Table && !meta.without_rowid && c.type_name != "integer" {
+            c.is_nullable = !meta.not_null.contains(&c.name);
+        }
     }
+    Keyset::new(SQLITE, table, query, &columns, tiebreak, enabled)
 }
 
 /// Indexes (with their columns and SQL), foreign keys and the DDL, after [`table_meta_statements`].
@@ -257,7 +284,7 @@ mod tests {
     }
 
     #[test]
-    fn maps_table_meta_and_tiebreak() {
+    fn maps_table_meta_and_keyset() {
         let table = TableInfo::new("main", "note_tags");
         let master = result(vec![vec![text("table"), text("create table note_tags (a, b, primary key (b, a)) WITHOUT ROWID")]]);
         let info = result(vec![
@@ -268,7 +295,10 @@ mod tests {
         let meta = table_meta(&table, master, info).unwrap();
         assert_eq!(meta.primary_key, ["b", "a"]);
         assert!(meta.without_rowid);
-        assert_eq!(tiebreak(&meta), ["\"b\"", "\"a\""]);
+        assert_eq!(meta.not_null, ["a", "b"]);
+        let keyset = keyset_for(&meta, &table, &RowQuery::default()).unwrap();
+        assert_eq!(keyset.order_by(), ["\"b\"", "\"a\""]);
+        assert!(keyset.enabled);
         assert!(meta.columns[2].is_nullable && !meta.columns[0].is_nullable);
         assert_eq!(meta.defaults[2].as_deref(), Some("'x'"));
 
