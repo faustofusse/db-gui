@@ -53,8 +53,9 @@ impl ConnectionConfig {
         Ok(())
     }
 
-    /// Parses `postgres://user:pass@host:5432/db?sslmode=require`, `mysql://…`, `sqlite:///path/file.db`
-    /// or a Turso / libSQL URL (`libsql://db-org.turso.io?authToken=…`, `https://…`, `http://localhost:8080`).
+    /// Parses `postgres://user:pass@host:5432/db?sslmode=require`, `mysql://…`, `sqlserver://…` (or `mssql://`),
+    /// `sqlite:///path/file.db` or a Turso / libSQL URL (`libsql://db-org.turso.io?authToken=…`, `https://…`,
+    /// `http://localhost:8080`). SQL Server URLs also take `encrypt` and `trustServerCertificate`.
     /// The name defaults to [`ConnectionConfig::default_name`]; id and group are left empty.
     pub fn from_url(input: &str) -> Result<Self> {
         let invalid = |msg: String| Error::InvalidConfig(msg);
@@ -64,6 +65,7 @@ impl ConnectionConfig {
             "mysql" | "mariadb" => DatabaseKind::Mysql,
             "sqlite" | "file" => DatabaseKind::Sqlite,
             "libsql" | "http" | "https" | "ws" | "wss" => return crate::libsql::url::from_url(&url),
+            "sqlserver" | "mssql" => DatabaseKind::SqlServer,
             other => return Err(invalid(format!("Unsupported URL scheme “{other}”."))),
         };
         let decode = |s: &str| percent_decode_str(s).decode_utf8_lossy().into_owned();
@@ -79,8 +81,14 @@ impl ConnectionConfig {
             config.database = decode(url.path().trim_start_matches('/'));
             config.user = Some(decode(url.username())).filter(|u| !u.is_empty());
             config.password = url.password().map(decode);
+            let mut encrypt: Option<String> = None;
+            let mut trust_cert: Option<bool> = None;
             for (key, value) in url.query_pairs() {
-                if key == "sslmode" || key == "ssl-mode" {
+                if kind == DatabaseKind::SqlServer && key.eq_ignore_ascii_case("encrypt") {
+                    encrypt = Some(value.to_ascii_lowercase());
+                } else if kind == DatabaseKind::SqlServer && key.eq_ignore_ascii_case("trustServerCertificate") {
+                    trust_cert = Some(matches!(value.to_ascii_lowercase().as_str(), "true" | "yes" | "1"));
+                } else if key == "sslmode" || key == "ssl-mode" {
                     config.ssl_mode = match value.to_ascii_lowercase().replace('_', "-").as_str() {
                         "disable" | "disabled" => SslMode::Disable,
                         "allow" | "prefer" | "preferred" => SslMode::Prefer,
@@ -88,7 +96,12 @@ impl ConnectionConfig {
                         "verify-ca" | "verify-full" | "verify-identity" => SslMode::VerifyFull,
                         other => return Err(invalid(format!("Unknown sslmode “{other}”."))),
                     };
+                } else if kind == DatabaseKind::SqlServer && key.eq_ignore_ascii_case("instance") && !value.is_empty() {
+                    config.host = format!("{}\\{value}", config.host);
                 }
+            }
+            if encrypt.is_some() || trust_cert.is_some() {
+                config.ssl_mode = sql_server_ssl_mode(encrypt.as_deref(), trust_cert).map_err(invalid)?;
             }
         }
         config.name = config.default_name();
@@ -103,7 +116,11 @@ impl ConnectionConfig {
         if self.kind == DatabaseKind::Libsql {
             return crate::libsql::url::to_url(self, include_password);
         }
-        let scheme = if self.kind == DatabaseKind::Postgres { "postgres" } else { "mysql" };
+        let scheme = match self.kind {
+            DatabaseKind::Postgres => "postgres",
+            DatabaseKind::SqlServer => "sqlserver",
+            _ => "mysql",
+        };
         let enc = |s: &str| utf8_percent_encode(s, USERINFO).to_string();
         let mut userinfo = String::new();
         if let Some(user) = self.user.as_deref().filter(|u| !u.is_empty()) {
@@ -114,16 +131,46 @@ impl ConnectionConfig {
             }
             userinfo.push('@');
         }
-        let host = if self.host.contains(':') { format!("[{}]", self.host) } else { self.host.clone() };
-        let port = self.port.map(|p| format!(":{p}")).unwrap_or_default();
-        let ssl = match self.ssl_mode {
-            SslMode::Prefer => "",
-            SslMode::Disable => "?sslmode=disable",
-            SslMode::Require => "?sslmode=require",
-            SslMode::VerifyFull => "?sslmode=verify-full",
+        // SQL Server named instances (`host\\SQLEXPRESS`) go in a query parameter.
+        let (host, instance) = match self.host.split_once('\\') {
+            Some((host, instance)) if self.kind == DatabaseKind::SqlServer => (host, Some(instance)),
+            _ => (self.host.as_str(), None),
         };
-        format!("{scheme}://{userinfo}{host}{port}/{}{ssl}", enc(&self.database))
+        let host = if host.contains(':') { format!("[{host}]") } else { host.to_string() };
+        let port = self.port.map(|p| format!(":{p}")).unwrap_or_default();
+        let mut params = Vec::new();
+        match self.ssl_mode {
+            SslMode::Prefer => {}
+            SslMode::Disable => params.push("sslmode=disable".to_string()),
+            SslMode::Require => params.push("sslmode=require".to_string()),
+            SslMode::VerifyFull => params.push("sslmode=verify-full".to_string()),
+        }
+        if let Some(instance) = instance {
+            params.push(format!("instance={}", utf8_percent_encode(instance, USERINFO)));
+        }
+        let query = if params.is_empty() { String::new() } else { format!("?{}", params.join("&")) };
+        format!("{scheme}://{userinfo}{host}{port}/{}{query}", enc(&self.database))
     }
+}
+
+/// SQL Server's `encrypt` / `trustServerCertificate` (JDBC, ADO.NET, DBeaver) as an [`SslMode`]:
+/// - `encrypt=false|optional`: only the login is encrypted → `Disable`.
+/// - `encrypt=true|mandatory|strict` (the JDBC default) with `trustServerCertificate=true` → `Require`,
+///   without it → `VerifyFull`.
+pub fn sql_server_ssl_mode(encrypt: Option<&str>, trust_server_certificate: Option<bool>) -> Result<SslMode, String> {
+    let encrypt = match encrypt.map(|e| e.trim().to_ascii_lowercase()) {
+        None => true,
+        Some(e) => match e.as_str() {
+            "false" | "no" | "0" | "optional" | "disable" | "disabled" => false,
+            "true" | "yes" | "1" | "mandatory" | "strict" | "require" | "required" => true,
+            other => return Err(format!("Unknown encrypt setting “{other}”.")),
+        },
+    };
+    Ok(match (encrypt, trust_server_certificate) {
+        (false, _) => SslMode::Disable,
+        (true, Some(true)) => SslMode::Require,
+        (true, _) => SslMode::VerifyFull,
+    })
 }
 
 #[cfg(test)]
@@ -161,6 +208,24 @@ mod tests {
         assert_eq!((c.name.as_str(), c.default_database()), ("app", "app"));
         let m = ConnectionConfig::from_url("mysql://root@localhost").unwrap();
         assert_eq!((m.name.as_str(), m.default_database()), ("localhost", ""));
+    }
+
+    #[test]
+    fn parses_sql_server_urls() {
+        let c = ConnectionConfig::from_url("sqlserver://sa:p%40ss@db.example.com:14339/app?encrypt=true&trustServerCertificate=true").unwrap();
+        assert_eq!((c.kind, c.host.as_str(), c.port, c.database.as_str()), (DatabaseKind::SqlServer, "db.example.com", Some(14339), "app"));
+        assert_eq!((c.user.as_deref(), c.password.as_deref(), c.ssl_mode), (Some("sa"), Some("p@ss"), SslMode::Require));
+        assert_eq!(c.to_url(true), "sqlserver://sa:p%40ss@db.example.com:14339/app?sslmode=require");
+
+        let c = ConnectionConfig::from_url("mssql://u@h/?encrypt=false").unwrap();
+        assert_eq!((c.ssl_mode, c.default_database(), c.name.as_str()), (SslMode::Disable, "master", "h"));
+        assert_eq!(ConnectionConfig::from_url("sqlserver://h/db?encrypt=true").unwrap().ssl_mode, SslMode::VerifyFull);
+        assert_eq!(ConnectionConfig::from_url("sqlserver://h/db?sslmode=require").unwrap().ssl_mode, SslMode::Require);
+        assert!(ConnectionConfig::from_url("sqlserver://h/db?encrypt=maybe").is_err());
+
+        let named = ConnectionConfig::from_url("sqlserver://h/db?instance=SQLEXPRESS").unwrap();
+        assert_eq!(named.host, "h\\SQLEXPRESS");
+        assert_eq!(named.to_url(false), "sqlserver://h/db?instance=SQLEXPRESS");
     }
 
     #[test]

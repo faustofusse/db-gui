@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
 members = ["crates/dbcore", "crates/dbcore-ffi", "tools/uniffi-bindgen"]
+# Third-party crates patched for dbear (see vendor/README.md): dependencies, not members.
+exclude = ["vendor/tiberius"]
 
 [workspace.package]
 edition = "2021"
@@ -27,6 +29,10 @@ rusqlite = { version = "0.40", features = ["bundled", "column_decltype"] }
 aes = "0.8"
 cbc = { version = "0.1", features = ["alloc"] }
 futures-util = { version = "0.3", default-features = false }
+# SQL Server (TDS). Vendored with a small patch: rustls on ring instead of aws-lc-rs, DONE row
+# counts on query streams, exact MONEY. See vendor/README.md.
+tiberius = { path = "vendor/tiberius", default-features = false, features = ["tds80", "rustls", "sql-browser-tokio"] }
+tokio-util = { version = "0.7", default-features = false, features = ["compat"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["v4"] }

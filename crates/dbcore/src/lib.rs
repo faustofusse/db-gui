@@ -19,6 +19,7 @@ pub mod model;
 pub mod mysql;
 pub mod postgres;
 pub mod sqlite;
+pub mod sqlserver;
 pub mod store;
 
 pub use connection::Connection;

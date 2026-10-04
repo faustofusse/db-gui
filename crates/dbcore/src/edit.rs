@@ -157,20 +157,22 @@ fn describe(statement: &EditStatement) -> String {
     if statement.expect_one_row { format!("the row where {}", statement.target) } else { statement.target.clone() }
 }
 
-/// MySQL and SQLite store booleans as integers: `true` typed into one must become `1`.
+/// MySQL and SQLite store booleans as integers, SQL Server as `bit`: `true` typed into one must become `1`.
 fn is_boolean(kind: DatabaseKind, column: &ColumnInfo) -> bool {
     let t = column.type_name.to_ascii_lowercase();
     match kind {
         DatabaseKind::Postgres => false,
         DatabaseKind::Mysql => t == "tinyint(1)" || t == "boolean" || t == "bool",
         DatabaseKind::Sqlite | DatabaseKind::Libsql => t.contains("bool"),
+        DatabaseKind::SqlServer => t == "bit",
     }
 }
 
 /// Binary values reach the grid as a hex preview (`0x…`, cut after 4 KB): they can't be written back.
 pub fn is_binary(column: &ColumnInfo) -> bool {
     let t = column.type_name.to_ascii_lowercase();
-    ["bytea", "blob", "binary", "geometry"].iter().any(|b| t.contains(b))
+    // SQL Server: `image`, `rowversion` (reported instead of its alias `timestamp`), CLR types.
+    ["bytea", "blob", "binary", "geometry", "image", "rowversion", "geography", "hierarchyid"].iter().any(|b| t.contains(b))
 }
 
 fn value_literal(d: Dialect, column: &ColumnInfo, value: &EditValue) -> String {
@@ -260,6 +262,14 @@ mod tests {
         let reset = [RowChange::Update { key: key(1), set: vec![set("name", EditValue::Default)] }];
         assert_eq!(sql(DatabaseKind::Postgres, &reset).unwrap(), [r#"UPDATE "app"."users" SET "name" = DEFAULT WHERE "id" = 1;"#]);
         assert!(matches!(sql(DatabaseKind::Sqlite, &reset), Err(Error::Unsupported(_))));
+
+        // SQL Server: `bit` takes 1/0, strings are Unicode literals.
+        let ms = [RowChange::Update { key: key(1), set: vec![set("active", EditValue::Text("yes".into())), set("name", EditValue::Text("Zoë".into()))] }];
+        let columns = [columns(), vec![ColumnInfo { name: "active".into(), type_name: "bit".into(), is_primary_key: false, is_nullable: true }]].concat();
+        let columns: Vec<_> = columns.into_iter().filter(|c| c.type_name != "tinyint(1)").collect();
+        let ms = statements(DatabaseKind::SqlServer, &TableInfo::new("dbo", "users"), &columns, &ms).unwrap();
+        assert_eq!(ms[0].sql, "UPDATE [dbo].[users] SET [active] = 1, [name] = N'Zoë' WHERE [id] = 1;");
+        assert_eq!(sql(DatabaseKind::SqlServer, &empty).unwrap(), ["INSERT INTO [app].[users] DEFAULT VALUES;"]);
 
         // MySQL strings escape backslashes.
         let path = [RowChange::Update { key: key(1), set: vec![set("name", EditValue::Text(r"C:\temp".into()))] }];

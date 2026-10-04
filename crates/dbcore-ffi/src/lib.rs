@@ -19,6 +19,7 @@ pub enum DatabaseKind {
     Sqlite,
     /// Turso / libSQL (shown as "Turso").
     Libsql,
+    SqlServer,
 }
 
 #[derive(uniffi::Enum, Clone, Copy)]
@@ -354,7 +355,7 @@ pub fn validate_connection(config: ConnectionConfig) -> Option<String> {
     dbcore::ConnectionConfig::from(config).validate().err().map(|e| e.to_string())
 }
 
-/// Parses `postgres://user:pass@host:port/db?sslmode=…` (and mysql/sqlite URLs).
+/// Parses `postgres://user:pass@host:port/db?sslmode=…` (and mysql/sqlserver/sqlite URLs).
 #[uniffi::export]
 pub fn parse_connection_url(url: String) -> Result<ConnectionConfig, DbError> {
     Ok(dbcore::ConnectionConfig::from_url(&url)?.into())
@@ -595,6 +596,7 @@ impl From<DatabaseKind> for dbcore::DatabaseKind {
             DatabaseKind::Mysql => Self::Mysql,
             DatabaseKind::Sqlite => Self::Sqlite,
             DatabaseKind::Libsql => Self::Libsql,
+            DatabaseKind::SqlServer => Self::SqlServer,
         }
     }
 }
@@ -606,6 +608,7 @@ impl From<dbcore::DatabaseKind> for DatabaseKind {
             dbcore::DatabaseKind::Mysql => Self::Mysql,
             dbcore::DatabaseKind::Sqlite => Self::Sqlite,
             dbcore::DatabaseKind::Libsql => Self::Libsql,
+            dbcore::DatabaseKind::SqlServer => Self::SqlServer,
         }
     }
 }

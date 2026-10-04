@@ -10,6 +10,8 @@ pub enum DatabaseKind {
     Sqlite,
     /// Turso / libSQL server (`sqld`) over Hrana HTTP; SQLite-compatible SQL.
     Libsql,
+    /// Microsoft SQL Server (and Azure SQL), over TDS.
+    SqlServer,
 }
 
 impl DatabaseKind {
@@ -19,6 +21,7 @@ impl DatabaseKind {
             Self::Mysql => "MySQL",
             Self::Sqlite => "SQLite",
             Self::Libsql => "Turso",
+            Self::SqlServer => "SQL Server",
         }
     }
 
@@ -28,6 +31,7 @@ impl DatabaseKind {
             Self::Postgres => Some(5432),
             Self::Mysql => Some(3306),
             Self::Sqlite | Self::Libsql => None,
+            Self::SqlServer => Some(1433),
         }
     }
 
@@ -90,9 +94,9 @@ impl std::fmt::Debug for ConnectionConfig {
 
 impl ConnectionConfig {
     /// Whether the server's other databases can be switched to, each opened with its own
-    /// session (Postgres, MySQL). SQLite files have none.
+    /// session (Postgres, MySQL, SQL Server). SQLite files have none.
     pub fn supports_multiple_databases(&self) -> bool {
-        matches!(self.kind, DatabaseKind::Postgres | DatabaseKind::Mysql)
+        matches!(self.kind, DatabaseKind::Postgres | DatabaseKind::Mysql | DatabaseKind::SqlServer)
     }
 
     /// The same connection pointed at another database on the server.
@@ -101,11 +105,13 @@ impl ConnectionConfig {
     }
 
     /// The database actually opened. `database` is optional for servers: Postgres then uses its
-    /// `postgres` maintenance database (present on virtually every server), MySQL needs none.
+    /// `postgres` maintenance database (present on virtually every server), SQL Server `master`,
+    /// MySQL needs none.
     pub fn default_database(&self) -> &str {
         let configured = self.database.trim();
         match self.kind {
             DatabaseKind::Postgres if configured.is_empty() => "postgres",
+            DatabaseKind::SqlServer if configured.is_empty() => "master",
             _ => configured,
         }
     }

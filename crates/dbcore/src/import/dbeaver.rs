@@ -11,6 +11,7 @@ use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
 use serde_json::Value as Json;
 
 use super::{ImportScan, ImportedConnection, SkippedConnection};
+use crate::config::sql_server_ssl_mode;
 use crate::driver::{Error, Result};
 use crate::model::{ConnectionConfig, DatabaseKind, SslMode};
 
@@ -150,6 +151,8 @@ fn convert(id: &str, source: &Json, credentials: Option<&Credentials>, project: 
         (_, d) if d.contains("libsql") => return convert_libsql(id, source, credentials, project),
         ("sqlite", _) => DatabaseKind::Sqlite,
         ("generic", d) if d.contains("sqlite") => DatabaseKind::Sqlite,
+        // `mssql` is the legacy provider id; Azure SQL and Babelfish connections use `sqlserver` too.
+        ("sqlserver" | "mssql", _) => DatabaseKind::SqlServer,
         (other, _) => return Err(format!("{} isn’t supported yet.", provider_display_name(other))),
     };
 
@@ -187,6 +190,10 @@ fn convert(id: &str, source: &Json, credentials: Option<&Credentials>, project: 
         // …and every MySQL database by default.
         DatabaseKind::Mysql => provider_flag("@dbeaver-show-all-dbs@").unwrap_or(true),
         DatabaseKind::Sqlite | DatabaseKind::Libsql => false,
+        // Every database by default, except for Azure SQL and Babelfish (DBeaver's SQLServerDataSource).
+        DatabaseKind::SqlServer => {
+            provider_flag("show-all-databases-azure").unwrap_or(!(driver.contains("azure") || driver.contains("babelfish")))
+        }
     };
     if config.name.is_empty() {
         config.name = config.default_name();
@@ -202,7 +209,7 @@ fn convert(id: &str, source: &Json, credentials: Option<&Credentials>, project: 
         warnings.push("Uses a proxy, which dbear doesn’t support yet.".into());
     }
     match conf["auth-model"].as_str() {
-        None | Some("native") => {}
+        None | Some("native") | Some("sqlserver_database") => {}
         Some(model) => warnings.push(format!("Uses “{model}” authentication; dbear will connect with a user and password.")),
     }
     if kind != DatabaseKind::Sqlite && config.password.is_none() {
@@ -264,6 +271,9 @@ fn convert_libsql(id: &str, source: &Json, credentials: Option<&Credentials>, pr
 /// `jdbc:postgresql://h:5432/db?sslmode=require`, `jdbc:mysql://…`, `jdbc:sqlite:/path/file.db`.
 fn from_jdbc_url(kind: DatabaseKind, url: &str) -> Option<ConnectionConfig> {
     let url = url.strip_prefix("jdbc:").unwrap_or(url);
+    if kind == DatabaseKind::SqlServer {
+        return from_sql_server_jdbc_url(url);
+    }
     if kind == DatabaseKind::Sqlite {
         let path = url.strip_prefix("sqlite:")?.trim_start_matches("file:");
         let path = path.split('?').next().unwrap_or(path);
@@ -288,6 +298,46 @@ fn from_jdbc_url(kind: DatabaseKind, url: &str) -> Option<ConnectionConfig> {
     ConnectionConfig::from_url(&url).ok()
 }
 
+/// `sqlserver://host[\\instance][:port][;databaseName=db;encrypt=…;trustServerCertificate=…;user=…]`
+/// (Microsoft's driver) or jTDS's `jtds:sqlserver://host[:port][/db][;instance=…]`.
+fn from_sql_server_jdbc_url(url: &str) -> Option<ConnectionConfig> {
+    let url = url.strip_prefix("jtds:").unwrap_or(url);
+    let rest = url.strip_prefix("sqlserver://")?;
+    let mut parts = rest.split(';');
+    let address = parts.next().unwrap_or_default();
+    let (address, path_db) = match address.split_once('/') {
+        Some((a, db)) => (a, Some(db)),
+        None => (address, None),
+    };
+    let (host, port) = match address.rsplit_once(':') {
+        Some((h, p)) if p.parse::<u16>().is_ok() => (h, p.parse().ok()),
+        _ => (address, None),
+    };
+    let mut config = ConnectionConfig::new_empty(DatabaseKind::SqlServer);
+    config.host = if host.is_empty() { "localhost".into() } else { host.to_string() };
+    config.port = port;
+    config.database = path_db.unwrap_or_default().to_string();
+    let (mut encrypt, mut trust) = (None, None);
+    for param in parts {
+        let Some((key, value)) = param.split_once('=') else { continue };
+        let value = value.trim();
+        match key.trim().to_ascii_lowercase().as_str() {
+            "databasename" | "database" => config.database = value.to_string(),
+            "user" | "username" => config.user = Some(value.to_string()).filter(|u| !u.is_empty()),
+            "instance" | "instancename" if !value.is_empty() => config.host = format!("{}\\{value}", config.host),
+            "portnumber" | "port" => config.port = value.parse().ok().or(config.port),
+            "servername" if host.is_empty() => config.host = value.to_string(),
+            "encrypt" => encrypt = Some(value.to_ascii_lowercase()),
+            "trustservercertificate" => trust = Some(value.eq_ignore_ascii_case("true")),
+            _ => {}
+        }
+    }
+    if encrypt.is_some() || trust.is_some() {
+        config.ssl_mode = sql_server_ssl_mode(encrypt.as_deref(), trust).unwrap_or_default();
+    }
+    Some(config)
+}
+
 /// SSL settings from the SSL handler or the driver properties, if DBeaver has any.
 fn ssl_mode(kind: DatabaseKind, conf: &Json) -> Option<SslMode> {
     let handlers = conf["handlers"].as_object();
@@ -301,6 +351,19 @@ fn ssl_mode(kind: DatabaseKind, conf: &Json) -> Option<SslMode> {
         "verify-ca" | "verify-full" | "verify-identity" => Some(SslMode::VerifyFull),
         _ => None,
     };
+    if kind == DatabaseKind::SqlServer {
+        // "Trust server certificate" is a provider property (or the driver's own property). With
+        // nothing set DBeaver sends `encrypt=false`; we keep our default (`prefer`), which encrypts
+        // without verifying, rather than downgrade.
+        let handler_on = ssl_handler.is_some_and(|h| h["enabled"].as_bool() == Some(true));
+        let encrypt = prop("encrypt").or(handler_on.then(|| "true".into()));
+        let flag = |v: &Json| v.as_str().map(|s| s.eq_ignore_ascii_case("true")).or(v.as_bool());
+        let trust = flag(&conf["provider-properties"]["sslTrustServerCertificate"]).or(flag(&props["trustServerCertificate"]));
+        if encrypt.is_none() && trust.is_none() {
+            return None;
+        }
+        return sql_server_ssl_mode(encrypt.as_deref(), trust).ok();
+    }
     if let Some(handler) = ssl_handler {
         if handler["enabled"].as_bool() == Some(true) {
             let hp = &handler["properties"];
@@ -314,7 +377,7 @@ fn ssl_mode(kind: DatabaseKind, conf: &Json) -> Option<SslMode> {
         DatabaseKind::Mysql => prop("sslMode")
             .and_then(|m| parse(&m))
             .or_else(|| (prop("useSSL").as_deref() == Some("false")).then_some(SslMode::Disable)),
-        DatabaseKind::Sqlite | DatabaseKind::Libsql => None,
+        DatabaseKind::Sqlite | DatabaseKind::Libsql | DatabaseKind::SqlServer => None,
     }
 }
 
@@ -387,7 +450,23 @@ mod tests {
                 "libsql_jdbc-9": {"provider": "sqlite", "driver": "libsql_jdbc", "name": "Replica file",
                     "configuration": {"url": "jdbc:dbeaver:libsql:file:/Users/me/replica.db"}},
                 "libsql_jdbc-10": {"provider": "sqlite", "driver": "libsql_jdbc", "name": "Empty", "configuration": {}},
-                "azure-6": {"provider": "sqlserver", "driver": "azure", "name": "Azure", "configuration": {}},
+                "azure-6": {
+                    "provider": "sqlserver", "driver": "mssql_jdbc_azure", "name": "Azure", "save-password": true,
+                    "configuration": {
+                        "host": "acme.database.windows.net", "port": "1433", "database": "sales",
+                        "auth-model": "sqlserver_ad_password",
+                        "properties": {"encrypt": "true"}
+                    }
+                },
+                "mssql_jdbc_ms_new-8": {
+                    "provider": "sqlserver", "driver": "mssql_jdbc_ms_new", "name": "Warehouse", "save-password": true,
+                    "configuration": {
+                        "url": "jdbc:sqlserver://wh.internal\\SQLEXPRESS:14330;databaseName=dw;encrypt=true;trustServerCertificate=true",
+                        "configurationType": "URL", "auth-model": "sqlserver_database",
+                        "provider-properties": {"show-all-databases-azure": "false"}
+                    }
+                },
+                "oracle-9": {"provider": "oracle", "driver": "oracle_thin", "name": "Ledger", "configuration": {}},
                 "postgres-jdbc-7": {
                     "provider": "postgresql", "driver": "postgres-jdbc", "save-password": true,
                     "configuration": {"host": "localhost", "port": "5432", "database": "app"}
@@ -447,8 +526,19 @@ mod tests {
         let file = by_name("Replica file");
         assert_eq!((file.config.kind, file.config.database.as_str()), (DatabaseKind::Sqlite, "/Users/me/replica.db"));
 
+        let azure = by_name("Azure");
+        assert_eq!((azure.config.kind, azure.config.host.as_str(), azure.config.database.as_str()), (DatabaseKind::SqlServer, "acme.database.windows.net", "sales"));
+        // encrypt=true without trusting the certificate: verify it. Azure shows one database by default.
+        assert_eq!((azure.config.ssl_mode, azure.config.show_all_databases), (SslMode::VerifyFull, false));
+        assert!(azure.warnings.iter().any(|w| w.contains("sqlserver_ad_password")), "{:?}", azure.warnings);
+
+        let wh = by_name("Warehouse");
+        assert_eq!((wh.config.host.as_str(), wh.config.port, wh.config.database.as_str()), ("wh.internal\\SQLEXPRESS", Some(14330), "dw"));
+        assert_eq!((wh.config.ssl_mode, wh.config.show_all_databases), (SslMode::Require, false));
+        assert!(!wh.warnings.iter().any(|w| w.contains("authentication")), "{:?}", wh.warnings);
+
         let skipped: Vec<_> = scan.skipped.iter().map(|s| (s.name.as_str(), s.reason.as_str())).collect();
-        assert_eq!(skipped, [("Azure", "SQL Server isn’t supported yet."), ("Empty", "No server URL is set.")]);
+        assert_eq!(skipped, [("Empty", "No server URL is set."), ("Ledger", "Oracle isn’t supported yet.")]);
     }
 
     #[test]
@@ -460,7 +550,7 @@ mod tests {
         std::fs::write(dot.join("credentials-config.json"), encrypt(r##"{"postgres-jdbc-1":{"#connection":{"user":"app","password":"s3cret"}}}"##)).unwrap();
 
         let scan = scan_path(dir.path()).unwrap();
-        assert_eq!((scan.connections.len(), scan.skipped.len()), (8, 2));
+        assert_eq!((scan.connections.len(), scan.skipped.len()), (10, 2));
         let pg = scan.connections.iter().find(|c| c.config.name == "Billing").unwrap();
         assert_eq!((pg.config.password.as_deref(), pg.config.group.as_str()), (Some("s3cret"), "Work / prod"));
 

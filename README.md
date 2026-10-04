@@ -42,11 +42,12 @@ Then skip `nix develop` and run the same commands as above (`./scripts/dev-db.sh
 ## Layout
 
 ```
-crates/dbcore/      Rust core: models, drivers (Postgres + mock), connection store, SQL highlighting
+crates/dbcore/      Rust core: models, drivers (Postgres, MySQL, SQLite, SQL Server, mock), connection store, SQL highlighting
 crates/dbcore-ffi/  UniFFI bindings for Swift
 apps/macos/         SwiftUI app
 apps/linux/         GPUI app (todo)
 scripts/            build, bundle, dev database, tests
+vendor/             third-party crates patched for dbear (tiberius; see vendor/README.md)
 ```
 
 ## Tests
@@ -55,6 +56,7 @@ scripts/            build, bundle, dev database, tests
 cargo test -p dbcore              # core (Postgres tests skip without a database)
 ./scripts/test-postgres.sh        # core against the dev database
 ./scripts/test-libsql.sh          # core against the dev libSQL server (container dbear-libsql)
+./scripts/test-sqlserver.sh       # core against the dev SQL Server (amd64 image under Rosetta, 4 GB)
 (cd apps/macos && swift test)     # Swift ⇄ Rust bridge
 ```
 
@@ -94,3 +96,10 @@ cargo test -p dbcore              # core (Postgres tests skip without a database
   Local libSQL files are SQLite files: open them as SQLite.
 - `bundle-mac.sh` signs with your "Apple Development" identity when you have one, so the
   Keychain's "Always Allow" survives rebuilds.
+- SQL Server uses [tiberius](https://github.com/prisma/tiberius), vendored with a small patch
+  (`vendor/README.md`): rustls on ring, row counts for scripts, exact MONEY. Scripts are split on
+  `GO` lines, and each batch runs on the script session, so temp tables and `SET` options persist.
+  A T-SQL batch can run several statements with no `;` between them, so the driver also requires a
+  table filter's parentheses to balance (`sqlserver::script::check_filter`). SSL "Disable" (shown as
+  "Login Only") still encrypts the login, as SQL Server always does. Only SQL logins are supported;
+  Windows and Azure AD authentication are not yet.

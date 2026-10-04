@@ -8,11 +8,12 @@ use crate::model::{ColumnInfo, DatabaseKind, SortKey};
 pub struct Dialect(pub DatabaseKind);
 
 impl Dialect {
-    /// Quotes an identifier: `"name"` (Postgres, SQLite) or `` `name` `` (MySQL).
+    /// Quotes an identifier: `"name"` (Postgres, SQLite), `` `name` `` (MySQL) or `[name]` (SQL Server).
     pub fn quote_ident(self, name: &str) -> String {
         match self.0 {
             DatabaseKind::Mysql => format!("`{}`", name.replace('`', "``")),
             DatabaseKind::Postgres | DatabaseKind::Sqlite | DatabaseKind::Libsql => format!("\"{}\"", name.replace('"', "\"\"")),
+            DatabaseKind::SqlServer => format!("[{}]", name.replace(']', "]]")),
         }
     }
 
@@ -27,13 +28,23 @@ impl Dialect {
             // Backslash is an escape character in MySQL strings (unless NO_BACKSLASH_ESCAPES).
             DatabaseKind::Mysql => format!("'{}'", value.replace('\\', "\\\\").replace('\'', "''")),
             DatabaseKind::Postgres | DatabaseKind::Sqlite | DatabaseKind::Libsql => format!("'{}'", value.replace('\'', "''")),
+            // `N'…'`: Unicode, so non-Latin text survives into NVARCHAR columns.
+            DatabaseKind::SqlServer => format!("N'{}'", value.replace('\'', "''")),
         }
     }
 
-    /// One page of rows: `select * from rel [where (…)] [order by …] limit n offset m` (same spelling everywhere).
-    /// `filter` must come from [`normalize_filter`].
+    /// One page of rows: `select * from rel [where (…)] [order by …] limit n offset m`. SQL Server spells
+    /// it `order by … offset m rows fetch next n rows only`, which needs an `order by` (`(select null)`
+    /// when there's nothing to sort by). `filter` must come from [`normalize_filter`].
     pub fn page_query(self, relation: &str, filter: Option<&str>, order_by: &[String], limit: u32, offset: u64) -> String {
         let order = if order_by.is_empty() { String::new() } else { format!(" order by {}", order_by.join(", ")) };
+        if self.0 == DatabaseKind::SqlServer {
+            let order = if order_by.is_empty() { " order by (select null)".to_string() } else { order };
+            return format!(
+                "select * from {relation}{}{order} offset {offset} rows fetch next {limit} rows only",
+                where_clause(filter)
+            );
+        }
         format!("select * from {relation}{}{order} limit {limit} offset {offset}", where_clause(filter))
     }
 
@@ -190,6 +201,21 @@ mod tests {
         assert_eq!(my.quote_relation("shop", "we`ird"), "`shop`.`we``ird`");
         assert_eq!(my.quote_literal(r"it's a\b"), r"'it''s a\\b'");
         assert_eq!(pg.quote_literal(r"it's a\b"), r"'it''s a\b'");
+    }
+
+    #[test]
+    fn quotes_sql_server() {
+        let ms = Dialect(DatabaseKind::SqlServer);
+        assert_eq!(ms.quote_relation("dbo", "we]ird name"), "[dbo].[we]]ird name]");
+        assert_eq!(ms.quote_literal("it's ☃"), "N'it''s ☃'");
+        assert_eq!(
+            ms.page_query("[dbo].[t]", Some("a = 1"), &["[id]".into()], 50, 100),
+            "select * from [dbo].[t] where (\na = 1\n) order by [id] offset 100 rows fetch next 50 rows only"
+        );
+        assert_eq!(
+            ms.page_query("[dbo].[t]", None, &[], 50, 0),
+            "select * from [dbo].[t] order by (select null) offset 0 rows fetch next 50 rows only"
+        );
     }
 
     #[test]

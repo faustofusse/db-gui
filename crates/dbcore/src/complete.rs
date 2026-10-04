@@ -734,6 +734,8 @@ fn dialect_functions(dialect: Dialect) -> Vec<&'static str> {
         }
         DatabaseKind::Mysql => &["if", "ifnull", "date_format", "group_concat", "json_extract", "curdate"],
         DatabaseKind::Sqlite | DatabaseKind::Libsql => &["strftime", "ifnull", "json_extract", "group_concat", "printf"],
+        DatabaseKind::SqlServer => &["getdate", "sysdatetime", "isnull", "convert", "try_cast", "dateadd", "datediff",
+            "datepart", "format", "len", "charindex", "newid", "iif", "string_agg", "json_value"],
     };
     COMMON.iter().chain(specific).copied().collect()
 }

@@ -6,7 +6,7 @@ version.workspace = true
 license.workspace = true
 
 [dependencies]
-tokio = { workspace = true, features = ["rt-multi-thread", "time", "macros"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "macros", "net", "sync"] }
 async-trait.workspace = true
 thiserror.workspace = true
 regex.workspace = true
@@ -16,6 +16,8 @@ rustls.workspace = true
 webpki-roots.workspace = true
 mysql_async.workspace = true
 rusqlite.workspace = true
+tiberius.workspace = true
+tokio-util.workspace = true
 aes.workspace = true
 cbc.workspace = true
 futures-util.workspace = true

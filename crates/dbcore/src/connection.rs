@@ -17,6 +17,7 @@ use crate::model::DatabaseKind;
 use crate::mysql::MysqlDriver;
 use crate::postgres::PostgresDriver;
 use crate::sqlite::SqliteDriver;
+use crate::sqlserver::SqlServerDriver;
 
 /// The core owns its tokio runtime, so callers can await from any executor
 /// (Swift concurrency through FFI, GPUI's executor, or tokio itself).
@@ -67,6 +68,7 @@ fn make_driver(config: ConnectionConfig) -> Arc<dyn Driver> {
         DatabaseKind::Mysql => Arc::new(MysqlDriver::new(config)),
         DatabaseKind::Sqlite => Arc::new(SqliteDriver::new(config)),
         DatabaseKind::Libsql => Arc::new(LibsqlDriver::new(config)),
+        DatabaseKind::SqlServer => Arc::new(SqlServerDriver::new(config)),
     }
 }
 
