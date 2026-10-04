@@ -40,6 +40,9 @@ public protocol DatabaseDriver: Sendable {
     /// One page of a table, sorted and filtered by `query`. `totalCount` is only set for the
     /// first page (`offset == 0`), and may be nil for a filtered big table.
     func fetchRows(of table: TableInfo, query: RowQuery, limit: Int, offset: Int) async throws -> QueryResult
+    /// The page after `after` (`nil`: the first page), in the same order as `fetchRows`.
+    /// Row ids start at `firstRowID`. `totalCount` is only set for the first page.
+    func fetchPage(of table: TableInfo, query: RowQuery, limit: Int, after: PageCursor?, firstRowID: Int) async throws -> TablePage
     /// Columns, keys, indexes, foreign keys and DDL of a table or view.
     func describeTable(_ table: TableInfo) async throws -> TableStructure
     /// The SQL `applyChanges` would run, in order. `columns` are the table's loaded columns.

@@ -52,6 +52,15 @@ final class RustDriver: DatabaseDriver {
         return QueryResult(page, firstRowID: offset)
     }
 
+    func fetchPage(of table: TableInfo, query: RowQuery, limit: Int, after: PageCursor?, firstRowID: Int) async throws -> TablePage {
+        let page = try await bridged {
+            try await connection.fetchPage(
+                table: DBCoreFFI.TableInfo(table), query: DBCoreFFI.RowQuery(query),
+                limit: UInt32(clamping: limit), after: after?.token)
+        }
+        return TablePage(result: QueryResult(page.result, firstRowID: firstRowID), next: page.nextCursor.map(PageCursor.init))
+    }
+
     func previewChanges(of table: TableInfo, columns: [ColumnInfo], changes: [RowChange]) throws -> [EditStatement] {
         do {
             return try connection.previewChanges(

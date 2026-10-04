@@ -75,6 +75,8 @@ final class TableTab: Identifiable {
     var loadMoreError: String?
     /// The last page came back short: everything is loaded.
     var reachedEnd = false
+    /// Where the next page starts (keyset cursor from the core); `nil` once everything is loaded.
+    var nextPage: PageCursor?
     /// Bumped when a load starts, so pages from an older load are dropped.
     var generation = 0
     /// Bumped when a load's rows arrive: tells the grid its rows were replaced (not just appended to).
@@ -849,14 +851,16 @@ final class AppModel {
         tab.isLoadingMore = false
         tab.loadMoreError = nil
         tab.reachedEnd = false
+        tab.nextPage = nil
         defer { if generation == tab.generation { tab.isReloading = false } }
         do {
-            let page = try await driver(for: tab.connection).fetchRows(
-                of: tab.table, query: tab.query, limit: pageSize, offset: 0)
+            let page = try await driver(for: tab.connection).fetchPage(
+                of: tab.table, query: tab.query, limit: pageSize, after: nil, firstRowID: 0)
             guard generation == tab.generation else { return }
-            tab.reachedEnd = page.rows.count < pageSize || page.totalCount.map { page.rows.count >= $0 } == true
+            tab.nextPage = page.next
+            tab.reachedEnd = page.next == nil
             tab.dataVersion += 1
-            tab.data = .loaded(page)
+            tab.data = .loaded(page.result)
         } catch {
             guard generation == tab.generation else { return }
             tab.data = .failed(error.localizedDescription)
@@ -866,16 +870,17 @@ final class AppModel {
 
     /// Appends the next page (called when the grid scrolls near the last loaded row).
     func loadMore(_ tab: TableTab) async {
-        guard tab.canLoadMore, let loaded = tab.data.value else { return }
+        guard tab.canLoadMore, let loaded = tab.data.value, let after = tab.nextPage else { return }
         let generation = tab.generation
         tab.isLoadingMore = true
         defer { if generation == tab.generation { tab.isLoadingMore = false } }
         do {
-            let page = try await driver(for: tab.connection)
-                .fetchRows(of: tab.table, query: tab.query, limit: pageSize, offset: loaded.rows.count)
+            let page = try await driver(for: tab.connection).fetchPage(
+                of: tab.table, query: tab.query, limit: pageSize, after: after, firstRowID: loaded.rows.count)
             guard generation == tab.generation, var current = tab.data.value else { return }
-            current.rows += page.rows
-            tab.reachedEnd = page.rows.count < pageSize
+            current.rows += page.result.rows
+            tab.nextPage = page.next
+            tab.reachedEnd = page.next == nil
             tab.data = .loaded(current)
         } catch {
             guard generation == tab.generation else { return }

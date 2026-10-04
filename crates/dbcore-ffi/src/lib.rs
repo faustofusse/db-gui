@@ -182,6 +182,13 @@ pub struct QueryResult {
     pub truncated: bool,
 }
 
+/// One page of a table and an opaque token for the next one (`None`: last page).
+#[derive(uniffi::Record)]
+pub struct RowPage {
+    pub result: QueryResult,
+    pub next_cursor: Option<String>,
+}
+
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum DbError {
     #[error("Connection failed: {message}")]
@@ -248,6 +255,14 @@ impl Connection {
     /// One page of a table, sorted and filtered by `query`.
     pub async fn fetch_rows(&self, table: TableInfo, query: RowQuery, limit: u32, offset: u64) -> Result<QueryResult, DbError> {
         Ok(self.inner.fetch_rows_with(table.into(), query.into(), limit, offset).await?.into())
+    }
+
+    /// One page of a table after `after` (a `next_cursor` from the previous page; `None`: the
+    /// first page). Seeks past the last row where possible, so deep pages stay fast.
+    pub async fn fetch_page(&self, table: TableInfo, query: RowQuery, limit: u32, after: Option<String>) -> Result<RowPage, DbError> {
+        let after = after.as_deref().map(dbcore::PageCursor::decode).transpose()?;
+        let page = self.inner.fetch_page(table.into(), query.into(), limit, after).await?;
+        Ok(RowPage { result: page.result.into(), next_cursor: page.next.map(|c| c.encode()) })
     }
 
     /// The statements `apply_changes` would run, in order (for the review sheet).

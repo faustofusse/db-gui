@@ -92,6 +92,43 @@ private let sqliteSeeded = FileManager.default.fileExists(atPath: Drivers.sample
     #expect(page.totalCount == 248)
 }
 
+/// Pages through a table with cursors; the rows and ids must match one OFFSET page.
+private func pageThrough(_ driver: any DatabaseDriver, _ table: TableInfo, query: RowQuery, limit: Int) async throws -> [Row] {
+    var rows: [Row] = []
+    var after: PageCursor?
+    repeat {
+        let page = try await driver.fetchPage(of: table, query: query, limit: limit, after: after, firstRowID: rows.count)
+        #expect(page.result.rows.count <= limit)
+        #expect((page.result.totalCount != nil) == (after == nil))
+        rows += page.result.rows
+        after = page.next
+    } while after != nil
+    return rows
+}
+
+@Test func pagesWithCursors() async throws {
+    let driver = Drivers.make(for: appDev)
+    let users = TableInfo(schema: "public", name: "users")
+    let query = RowQuery(sort: [SortKey(column: "name", descending: true)])
+    let paged = try await pageThrough(driver, users, query: query, limit: 50)
+    let all = try await driver.fetchRows(of: users, query: query, limit: 1000, offset: 0)
+    #expect(paged.count == 248)
+    #expect(paged.map(\.id) == Array(0..<248))
+    #expect(paged.map(\.values) == all.rows.map(\.values))
+}
+
+@Test(.enabled(if: sqliteSeeded)) func realSQLitePagesWithKeysetCursors() async throws {
+    let driver = Drivers.make(for: devSQLite)
+    let notes = TableInfo(schema: "main", name: "notes")
+    for query in [RowQuery(), RowQuery(sort: [SortKey(column: "title", descending: true)])] {
+        let paged = try await pageThrough(driver, notes, query: query, limit: 7)
+        let all = try await driver.fetchRows(of: notes, query: query, limit: 10_000, offset: 0)
+        #expect(paged.map(\.values) == all.rows.map(\.values))
+        #expect(paged.map(\.id) == Array(0..<all.rows.count))
+    }
+    await driver.disconnect()
+}
+
 @Test func mapsCoreErrors() async {
     let replica = connections.first { $0.id == "prod-replica" }!
     await #expect {
