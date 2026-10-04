@@ -95,6 +95,12 @@ cargo test -p dbcore              # core (Postgres tests skip without a database
   leaves open is rolled back when that script ends. Row counts are never computed, because Turso bills
   rows read. Cancel stops the request, but a statement already running on the server can still finish.
   Local libSQL files are SQLite files: open them as SQLite.
+- **Dump / restore** (connection or tables-list menus): `dbcore::dump` writes plain SQL (optionally
+  gzipped) that `psql`, `mysql` and `sqlite3` can load, from one consistent snapshot, streaming to
+  `<file>.partial` until done. `dbcore::restore` runs such scripts, also `pg_dump`/`mysqldump`/`sqlite3 .dump`
+  plain output, including `COPY … FROM stdin` blocks. Postgres dumps skip owners and grants
+  (`pg_dump --no-owner --no-privileges`). CLI for testing: `cargo run -p dbcore --example dump -- dump <url> out.sql.gz`.
+  Round trips are tested in `crates/dbcore/tests/dump_*.rs` (fixtures in `dev/dump/`).
 - `bundle-mac.sh` signs with your "Apple Development" identity when you have one, so the
   Keychain's "Always Allow" survives rebuilds.
 - SQL Server uses [tiberius](https://github.com/prisma/tiberius), vendored with a small patch
