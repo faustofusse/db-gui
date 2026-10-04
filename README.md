@@ -70,7 +70,9 @@ cargo test -p dbcore              # core (Postgres tests skip without a database
   Data view the toolbar search field (⌘L) is a raw `WHERE` filter, applied with Return and
   completed like the script editor (`complete::complete_filter`). Elsewhere (Structure, script
   results) it searches as you type. The core sorts by the primary key (or ctid/rowid) after the
-  user's columns, so pages stay stable. It also rejects a filter with a `;` between statements:
+  user's columns, so pages stay stable. Pages are fetched with keyset paging (`dbcore::keyset`: `where (sort keys) > (last row's)`
+  instead of `OFFSET`), so deep pages load as fast as the first; views, keyless MySQL tables and sort types
+  that don't compare the way they sort fall back to `OFFSET`. The core also rejects a filter with a `;` between statements:
   `dialect::normalize_filter` is the only guard for MySQL, whose text protocol runs multiple
   statements. Postgres and SQLite also prepare a single statement.
 - Structure (⌥⌘2) comes from `Driver::describe_table`: columns with defaults and comments, the

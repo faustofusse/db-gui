@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 
 use crate::edit::EditStatement;
+use crate::keyset::{PageCursor, RowPage};
 use crate::model::{ConnectionConfig, QueryResult, RowQuery, Schema, TableColumns, TableInfo, TableStructure};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -51,6 +52,15 @@ pub trait Driver: Send + Sync + 'static {
     /// `total_count` is only computed for the first page (`offset == 0`), so loading further
     /// pages stays cheap; with a filter it may be `None` on big tables (counting would scan them).
     async fn fetch_rows(&self, table: &TableInfo, query: &RowQuery, limit: u32, offset: u64) -> Result<QueryResult>;
+    /// One page of a table after `after` (`None`: the first page), in the same order as `fetch_rows`.
+    /// `next` is `None` on the last page; `total_count` is only computed for the first one.
+    /// Drivers seek past the last row when they can (see [`crate::keyset`]); this default pages
+    /// with OFFSET.
+    async fn fetch_page(&self, table: &TableInfo, query: &RowQuery, limit: u32, after: Option<&PageCursor>) -> Result<RowPage> {
+        let offset = PageCursor::offset_for(after, table, query);
+        let result = self.fetch_rows(table, query, limit.saturating_add(1), offset).await?;
+        Ok(RowPage::from_offset(result, table, query, limit, offset))
+    }
     /// Columns, keys, indexes, foreign keys and DDL of a table or view.
     async fn describe_table(&self, table: &TableInfo) -> Result<TableStructure>;
     /// Runs a script. At most `max_rows` rows are kept; the rest are counted and dropped

@@ -9,6 +9,7 @@ use tokio::task::JoinHandle;
 use crate::driver::{Driver, Error, Result};
 use crate::dialect::normalize_filter;
 use crate::edit::{self, EditStatement, RowChange};
+use crate::keyset::{PageCursor, RowPage};
 use crate::model::{ColumnInfo, ConnectionConfig, QueryResult, RowQuery, Schema, TableColumns, TableInfo, TableStructure};
 use crate::mock::{self, MockDriver};
 use crate::model::DatabaseKind;
@@ -126,6 +127,13 @@ impl Connection {
         query.filter = normalize_filter(query.filter.as_deref())?;
         let d = self.driver.clone();
         on_runtime(async move { d.fetch_rows(&table, &query, limit, offset).await }).await
+    }
+
+    /// One page of a table after `after` (`None`: the first page); see [`Driver::fetch_page`].
+    pub async fn fetch_page(&self, table: TableInfo, mut query: RowQuery, limit: u32, after: Option<PageCursor>) -> Result<RowPage> {
+        query.filter = normalize_filter(query.filter.as_deref())?;
+        let d = self.driver.clone();
+        on_runtime(async move { d.fetch_page(&table, &query, limit, after.as_ref()).await }).await
     }
 
     /// The SQL that `apply_changes` would run, for review (no connection needed).

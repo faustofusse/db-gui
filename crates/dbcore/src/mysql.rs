@@ -21,6 +21,7 @@ use tokio::sync::{Mutex, MutexGuard};
 use crate::dialect::{error_chain, hex_preview, Dialect};
 use crate::driver::{Driver, Error, Result};
 use crate::edit::{self, EditStatement};
+use crate::keyset::{page_sql, CursorValue, Keyset, PageCursor, RowPage, SeekColumn, Start};
 use crate::model::*;
 
 const MYSQL: Dialect = Dialect(DatabaseKind::Mysql);
@@ -280,26 +281,53 @@ impl Driver for MysqlDriver {
         let mut lease = self.browse.lease(&self.config).await?;
         let meta = TableMeta::load(&mut lease, table).await?;
         let relation = MYSQL.quote_relation(&table.schema, &table.name);
-        let tiebreak: Vec<String> = meta.primary_key.iter().map(|c| MYSQL.quote_ident(c)).collect();
-        let order_by = MYSQL.order_by(&query.sort, &meta.columns, &tiebreak)?;
+        let (keyset, _) = meta.keyset(table, query)?;
         let filter = query.filter.as_deref();
-        let sql = MYSQL.page_query(&relation, filter, &order_by, limit, offset);
+        let sql = page_sql(&relation, &[], filter, None, &keyset.order_by(), u64::from(limit), offset);
 
-        let result = run_script(lease.conn(), &sql, None).await;
-        let mut result = lease.check(result).map_err(|e| query_error(&e))?;
-        result.columns = meta.columns;
+        let result = run_page(lease.conn(), &sql, &[]).await;
+        let (mut result, _) = lease.check(result).map_err(|e| query_error(&e))?;
+        result.columns = meta.columns.clone();
+        if offset == 0 {
+            result.total_count = meta.total_count(&mut lease, &relation, filter).await?;
+        }
+        Ok(result)
+    }
 
-        result.total_count = match meta.estimated_rows {
-            _ if offset > 0 => None,
-            None => None,
-            Some(rows) if rows >= EXACT_COUNT_THRESHOLD && filter.is_some() => None,
-            Some(rows) if rows >= EXACT_COUNT_THRESHOLD => Some(rows),
-            Some(_) => {
-                let count = lease.conn().query_first::<u64, _>(MYSQL.count_query(&relation, filter)).await;
-                lease.check(count).map_err(|e| query_error(&e))?
+    async fn fetch_page(&self, table: &TableInfo, query: &RowQuery, limit: u32, after: Option<&PageCursor>) -> Result<RowPage> {
+        let mut lease = self.browse.lease(&self.config).await?;
+        let meta = TableMeta::load(&mut lease, table).await?;
+        let relation = MYSQL.quote_relation(&table.schema, &table.name);
+        let (keyset, kinds) = meta.keyset(table, query)?;
+        let filter = query.filter.as_deref();
+
+        let start = keyset.start(after, |i, v| render_key(kinds[i], v));
+        let (segments, offset) = match start {
+            Start::Offset(n) => (vec![None], n),
+            Start::Seek(segments) => (segments.into_iter().map(Some).collect(), 0),
+            Start::Empty => {
+                let result = QueryResult { columns: meta.columns, ..Default::default() };
+                return Ok(RowPage { result, next: None });
             }
         };
-        Ok(result)
+        let (mut result, mut keys) = (QueryResult::default(), Vec::new());
+        let want = limit as usize + 1;
+        for seek in segments {
+            let need = want.saturating_sub(result.rows.len()) as u64;
+            if need == 0 {
+                break;
+            }
+            let sql = page_sql(&relation, &[], filter, seek.as_deref(), &keyset.order_by(), need, offset);
+            let part = run_page(lease.conn(), &sql, &keyset.key_indexes()).await;
+            let (part, part_keys) = lease.check(part).map_err(|e| query_error(&e))?;
+            result.rows.extend(part.rows);
+            keys.extend(part_keys);
+        }
+        result.columns = meta.columns.clone();
+        if after.is_none() {
+            result.total_count = meta.total_count(&mut lease, &relation, filter).await?;
+        }
+        Ok(keyset.finish(result, keys, meta.columns.len(), limit, after))
     }
 
     async fn describe_table(&self, table: &TableInfo) -> Result<TableStructure> {
@@ -400,6 +428,8 @@ impl Drop for KillOnDrop {
 struct TableMeta {
     columns: Vec<ColumnInfo>,
     primary_key: Vec<String>,
+    /// Without a primary key: the smallest plain unique index on NOT NULL columns, if any.
+    unique_key: Vec<String>,
     /// Server estimate for base tables; `None` for views.
     estimated_rows: Option<u64>,
 }
@@ -435,11 +465,112 @@ impl TableMeta {
                 is_nullable: nullable == "YES",
             })
             .collect();
+        let primary_key: Vec<String> = columns.iter().filter(|c| c.is_primary_key).map(|c| c.name.clone()).collect();
+        let unique_key = if primary_key.is_empty() && table_type != "VIEW" {
+            unique_key(lease, &schema, &name, &columns).await?
+        } else {
+            Vec::new()
+        };
         Ok(Self {
-            primary_key: columns.iter().filter(|c| c.is_primary_key).map(|c| c.name.clone()).collect(),
+            primary_key,
+            unique_key,
             columns,
             estimated_rows: if table_type == "VIEW" { None } else { Some(table_rows.unwrap_or(0)) },
         })
+    }
+
+    /// Page order: the user's sort, then the primary key (else a unique NOT NULL index). Seeking
+    /// needs such a key, and sort types that compare the way they sort (see [`key_kind`]); the
+    /// rest pages with OFFSET. Also returns how to spell each term's values.
+    fn keyset(&self, table: &TableInfo, query: &RowQuery) -> Result<(Keyset, Vec<KeyKind>)> {
+        let key = if self.primary_key.is_empty() { &self.unique_key } else { &self.primary_key };
+        let tiebreak: Vec<SeekColumn> = key.iter().filter_map(|c| SeekColumn::column(MYSQL, &self.columns, c)).collect();
+        let mut keyset = Keyset::new(MYSQL, table, query, &self.columns, tiebreak, !key.is_empty())?;
+        let kinds: Option<Vec<KeyKind>> = keyset.columns.iter().map(|c| key_kind(&self.columns[c.index].type_name)).collect();
+        keyset.enabled &= kinds.is_some();
+        Ok((keyset, kinds.unwrap_or_default()))
+    }
+
+    /// Exact for small tables, the server's estimate for big unfiltered ones, else unknown.
+    async fn total_count(&self, lease: &mut Lease<'_>, relation: &str, filter: Option<&str>) -> Result<Option<u64>> {
+        Ok(match self.estimated_rows {
+            None => None,
+            Some(rows) if rows >= EXACT_COUNT_THRESHOLD && filter.is_some() => None,
+            Some(rows) if rows >= EXACT_COUNT_THRESHOLD => Some(rows),
+            Some(_) => {
+                let count = lease.conn().query_first::<u64, _>(MYSQL.count_query(relation, filter)).await;
+                lease.check(count).map_err(|e| query_error(&e))?
+            }
+        })
+    }
+}
+
+/// Columns of the unique index with the fewest columns whose parts are all whole (no prefix,
+/// no expression) NOT NULL columns: a unique tiebreak for paging tables without a primary key.
+/// `schema` and `name` are quoted literals.
+async fn unique_key(lease: &mut Lease<'_>, schema: &str, name: &str, columns: &[ColumnInfo]) -> Result<Vec<String>> {
+    let parts = lease
+        .conn()
+        .query::<(String, Option<String>, Option<u64>), _>(format!(
+            "select index_name, column_name, sub_part from information_schema.statistics
+             where table_schema = {schema} and table_name = {name} and non_unique = 0 and index_name <> 'PRIMARY'
+             order by index_name, seq_in_index"
+        ))
+        .await;
+    let parts = lease.check(parts).map_err(|e| query_error(&e))?;
+    let mut indexes: Vec<(String, Option<Vec<String>>)> = Vec::new();
+    for (index, column, sub_part) in parts {
+        if indexes.last().is_none_or(|(n, _)| *n != index) {
+            indexes.push((index, Some(Vec::new())));
+        }
+        let usable = column.filter(|c| sub_part.is_none() && columns.iter().any(|k| &k.name == c && !k.is_nullable));
+        let entry = &mut indexes.last_mut().unwrap().1;
+        match (usable, entry.as_mut()) {
+            (Some(c), Some(list)) => list.push(c),
+            _ => *entry = None,
+        }
+    }
+    Ok(indexes.into_iter().filter_map(|(_, c)| c).min_by_key(Vec::len).unwrap_or_default())
+}
+
+/// How a sort key's value is written back into a seek predicate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyKind {
+    /// Bare: comparing a BIGINT with a string would go through doubles and lose precision.
+    Number,
+    /// A string literal, compared in the column's collation (or converted to a date/time).
+    Quoted,
+    /// `X'…'` for binary strings.
+    Hex,
+}
+
+/// Types whose `>`/`<` agree with `ORDER BY`. Not FLOAT (its f32 values never equal their decimal
+/// text), ENUM/SET (sorted by position, compared as strings), BIT, JSON, spatial types, and
+/// TEXT/BLOB (sorted by their first `max_sort_length` bytes only).
+fn key_kind(column_type: &str) -> Option<KeyKind> {
+    let base = column_type.split(['(', ' ']).next().unwrap_or_default().to_ascii_lowercase();
+    match base.as_str() {
+        "tinyint" | "smallint" | "mediumint" | "int" | "integer" | "bigint" | "decimal" | "numeric" | "double"
+        | "real" | "year" => Some(KeyKind::Number),
+        "char" | "varchar" | "date" | "datetime" | "timestamp" | "time" => Some(KeyKind::Quoted),
+        "binary" | "varbinary" => Some(KeyKind::Hex),
+        _ => None,
+    }
+}
+
+fn render_key(kind: KeyKind, value: &CursorValue) -> String {
+    let bytes: &[u8] = match value {
+        CursorValue::Text(t) => t.as_bytes(),
+        CursorValue::Bytes(b) => b,
+        CursorValue::Int(i) => return i.to_string(),
+        CursorValue::Float(bits) => return f64::from_bits(*bits).to_string(),
+        CursorValue::Null => unreachable!("NULL keys are never rendered"),
+    };
+    let numeric = !bytes.is_empty() && bytes.iter().all(|b| b.is_ascii_digit() || b"+-.eE".contains(b));
+    match kind {
+        KeyKind::Number if numeric => String::from_utf8_lossy(bytes).into_owned(),
+        KeyKind::Hex => format!("X'{}'", bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()),
+        _ => MYSQL.quote_literal(&String::from_utf8_lossy(bytes)),
     }
 }
 
@@ -610,6 +741,45 @@ async fn run_script(conn: &mut Conn, sql: &str, max_rows: Option<u32>) -> std::r
     // An error in a later statement arrives after the previous result: surface it.
     stream.drop_result().await?;
     Ok(last_rows.unwrap_or(QueryResult { rows_affected: last_affected, ..Default::default() }))
+}
+
+/// Runs a table page query (the last result set counts) and also returns the raw values at
+/// `keys` in every row, for keyset cursors.
+async fn run_page(
+    conn: &mut Conn,
+    sql: &str,
+    keys: &[usize],
+) -> std::result::Result<(QueryResult, Vec<Vec<CursorValue>>), mysql_async::Error> {
+    let mut stream = conn.query_iter(sql).await?;
+    let mut last = (QueryResult::default(), Vec::new());
+    while let Some(columns) = stream.columns() {
+        if columns.is_empty() {
+            stream.reduce((), |(), _: mysql_async::Row| ()).await?;
+            continue;
+        }
+        last = stream
+            .reduce((QueryResult::default(), Vec::new()), |(mut result, mut key_rows), row: mysql_async::Row| {
+                let values = row.unwrap();
+                if !keys.is_empty() {
+                    key_rows.push(keys.iter().map(|&i| key_value(values.get(i).cloned())).collect::<Vec<_>>());
+                }
+                result.rows.push(values.into_iter().zip(columns.iter()).map(|(v, c)| decode(v, c)).collect());
+                (result, key_rows)
+            })
+            .await?;
+    }
+    stream.drop_result().await?;
+    Ok(last)
+}
+
+fn key_value(value: Option<mysql_async::Value>) -> CursorValue {
+    use mysql_async::Value as V;
+    match value {
+        None | Some(V::NULL) => CursorValue::Null,
+        Some(V::Bytes(b)) => String::from_utf8(b).map_or_else(|e| CursorValue::Bytes(e.into_bytes()), CursorValue::Text),
+        Some(V::Int(i)) => CursorValue::Int(i),
+        Some(other) => CursorValue::Text(other.as_sql(true)),
+    }
 }
 
 /// Turns a text-protocol value into a typed `Value` using the column metadata.

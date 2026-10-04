@@ -18,6 +18,7 @@ use rusqlite::{Batch, ErrorCode, InterruptHandle, OpenFlags, OptionalExtension};
 use crate::dialect::{hex_preview, line_column, Dialect};
 use crate::driver::{Driver, Error, Result};
 use crate::edit::{self, EditStatement};
+use crate::keyset::{page_sql, CursorValue, Keyset, PageCursor, RowPage, SeekColumn, Start};
 use crate::model::*;
 
 const SQLITE: Dialect = Dialect(DatabaseKind::Sqlite);
@@ -136,6 +137,11 @@ impl Driver for SqliteDriver {
     async fn fetch_rows(&self, table: &TableInfo, query: &RowQuery, limit: u32, offset: u64) -> Result<QueryResult> {
         let (table, query) = (table.clone(), query.clone());
         self.run(&self.browse, move |conn| fetch_rows(conn, &table, &query, limit, offset)).await
+    }
+
+    async fn fetch_page(&self, table: &TableInfo, query: &RowQuery, limit: u32, after: Option<&PageCursor>) -> Result<RowPage> {
+        let (table, query, after) = (table.clone(), query.clone(), after.cloned());
+        self.run(&self.browse, move |conn| fetch_page(conn, &table, &query, limit, after.as_ref())).await
     }
 
     async fn describe_table(&self, table: &TableInfo) -> Result<TableStructure> {
@@ -276,6 +282,8 @@ struct TableMeta {
     /// Primary key columns in key order.
     primary_key: Vec<String>,
     without_rowid: bool,
+    /// Columns declared NOT NULL (primary key columns are reported non-nullable regardless).
+    not_null: Vec<String>,
 }
 
 fn table_meta(conn: &rusqlite::Connection, table: &TableInfo) -> Result<TableMeta> {
@@ -297,7 +305,9 @@ fn table_meta(conn: &rusqlite::Connection, table: &TableInfo) -> Result<TableMet
 
     let mut keyed: Vec<(i64, String)> = rows.iter().filter(|r| r.3 > 0).map(|r| (r.3, r.0.clone())).collect();
     keyed.sort();
+    let not_null = rows.iter().filter(|r| r.2).map(|r| r.0.clone()).collect();
     Ok(TableMeta {
+        not_null,
         kind: if kind == "view" { TableKind::View } else { TableKind::Table },
         columns: rows
             .into_iter()
@@ -316,22 +326,113 @@ fn table_meta(conn: &rusqlite::Connection, table: &TableInfo) -> Result<TableMet
 fn fetch_rows(conn: &rusqlite::Connection, table: &TableInfo, query: &RowQuery, limit: u32, offset: u64) -> Result<QueryResult> {
     let meta = table_meta(conn, table)?;
     let relation = SQLITE.quote_relation(&table.schema, &table.name);
-    let tiebreak: Vec<String> = match meta.kind {
-        // `rowid` is the insertion order for most tables and is always indexed.
-        TableKind::Table if !meta.without_rowid && meta.primary_key.len() != 1 => vec!["rowid".into()],
-        TableKind::Table => meta.primary_key.iter().map(|c| SQLITE.quote_ident(c)).collect(),
-        TableKind::View => Vec::new(),
-    };
-    let order_by = SQLITE.order_by(&query.sort, &meta.columns, &tiebreak)?;
+    let keyset = keyset_for(&meta, table, query)?;
     let filter = query.filter.as_deref();
-    let sql = SQLITE.page_query(&relation, filter, &order_by, limit, offset);
+    let sql = page_sql(&relation, &[], filter, None, &keyset.order_by(), u64::from(limit), offset);
     // A filter is one expression, but `run_script` would happily run a second statement: prepare just one.
-    let mut result = run_statement(conn, &sql)?;
+    let (mut result, _) = run_statement(conn, &sql, &[], &[])?;
     result.columns = meta.columns;
     if offset == 0 && meta.kind == TableKind::Table {
         result.total_count = Some(count(conn, &SQLITE.count_query(&relation, filter))?);
     }
     Ok(result)
+}
+
+/// Like `fetch_rows`, but seeks past the cursor's last row (bound as parameters) when the table
+/// has a usable row id or key.
+fn fetch_page(conn: &rusqlite::Connection, table: &TableInfo, query: &RowQuery, limit: u32, after: Option<&PageCursor>) -> Result<RowPage> {
+    let meta = table_meta(conn, table)?;
+    let relation = SQLITE.quote_relation(&table.schema, &table.name);
+    let keyset = keyset_for(&meta, table, query)?;
+    let filter = query.filter.as_deref();
+    let width = meta.columns.len();
+    let extra: Vec<String> = keyset.columns.iter().filter(|c| c.index >= width).map(|c| c.expr.clone()).collect();
+
+    // `?N` is the N-th sort term, however often the predicate repeats it.
+    let mut params: Vec<rusqlite::types::Value> = Vec::new();
+    let start = keyset.start(after, |i, v| {
+        if params.len() <= i {
+            params.resize(i + 1, rusqlite::types::Value::Null);
+        }
+        params[i] = to_sql(v);
+        format!("?{}", i + 1)
+    });
+    let (segments, offset) = match start {
+        Start::Offset(n) => (vec![None], n),
+        Start::Seek(segments) => (segments.into_iter().map(Some).collect(), 0),
+        Start::Empty => {
+            let result = QueryResult { columns: meta.columns, ..Default::default() };
+            return Ok(RowPage { result, next: None });
+        }
+    };
+    let (mut result, mut keys) = (QueryResult::default(), Vec::new());
+    let want = limit as usize + 1;
+    for seek in segments {
+        let need = want.saturating_sub(result.rows.len()) as u64;
+        if need == 0 {
+            break;
+        }
+        let sql = page_sql(&relation, &extra, filter, seek.as_deref(), &keyset.order_by(), need, offset);
+        let (part, part_keys) = run_statement(conn, &sql, &params, &keyset.key_indexes())?;
+        result.rows.extend(part.rows);
+        keys.extend(part_keys);
+    }
+    result.columns = meta.columns;
+    if after.is_none() && meta.kind == TableKind::Table {
+        result.total_count = Some(count(conn, &SQLITE.count_query(&relation, filter))?);
+    }
+    Ok(keyset.finish(result, keys, width, limit, after))
+}
+
+/// The order of a table's pages: the user's sort, then `rowid` (insertion order for most tables
+/// and always indexed) or the primary key. Seeking needs that tiebreak to be unique and not
+/// shadowed by a column of the same name; views always page with OFFSET.
+fn keyset_for(meta: &TableMeta, table: &TableInfo, query: &RowQuery) -> Result<Keyset> {
+    let width = meta.columns.len();
+    let shadowed = meta.columns.iter().any(|c| ["rowid", "_rowid_", "oid"].iter().any(|r| c.name.eq_ignore_ascii_case(r)));
+    let key_columns = || meta.primary_key.iter().filter_map(|c| SeekColumn::column(SQLITE, &meta.columns, c));
+    let (tiebreak, enabled): (Vec<SeekColumn>, bool) = match meta.kind {
+        TableKind::Table if !meta.without_rowid && meta.primary_key.len() != 1 => (vec![SeekColumn::row_id("rowid", width)], !shadowed),
+        // A lone INTEGER PRIMARY KEY is the rowid itself. Other single keys can hold NULLs (an old
+        // SQLite quirk), so `rowid` goes after them to keep the order unique.
+        TableKind::Table if !meta.without_rowid && !meta.columns.iter().any(|c| c.is_primary_key && c.type_name == "integer") => {
+            let mut keys: Vec<SeekColumn> = key_columns().map(|c| SeekColumn { nullable: true, ..c }).collect();
+            keys.push(SeekColumn::row_id("rowid", width));
+            (keys, !shadowed)
+        }
+        TableKind::Table => (key_columns().collect(), true),
+        TableKind::View => (Vec::new(), false),
+    };
+    // Keys declared without NOT NULL may hold NULLs in SQLite: say so, so seeks handle them.
+    let mut columns = meta.columns.clone();
+    for c in &mut columns {
+        if c.is_primary_key && meta.kind == TableKind::Table && !meta.without_rowid && c.type_name != "integer" {
+            c.is_nullable = !meta.not_null.contains(&c.name);
+        }
+    }
+    Keyset::new(SQLITE, table, query, &columns, tiebreak, enabled)
+}
+
+fn to_sql(v: &CursorValue) -> rusqlite::types::Value {
+    use rusqlite::types::Value as V;
+    match v {
+        CursorValue::Null => V::Null,
+        CursorValue::Int(i) => V::Integer(*i),
+        CursorValue::Float(bits) => V::Real(f64::from_bits(*bits)),
+        CursorValue::Text(t) => V::Text(t.clone()),
+        CursorValue::Bytes(b) => V::Blob(b.clone()),
+    }
+}
+
+/// The exact value (storage class included) of a sort key, for the next page's seek.
+fn key_value(v: ValueRef<'_>) -> CursorValue {
+    match v {
+        ValueRef::Null => CursorValue::Null,
+        ValueRef::Integer(i) => CursorValue::Int(i),
+        ValueRef::Real(f) => CursorValue::float(f),
+        ValueRef::Text(t) => CursorValue::Text(String::from_utf8_lossy(t).into_owned()),
+        ValueRef::Blob(b) => CursorValue::Bytes(b.to_vec()),
+    }
 }
 
 // MARK: Editing
@@ -454,9 +555,15 @@ fn describe(conn: &rusqlite::Connection, table: &TableInfo) -> Result<TableStruc
 
 // MARK: Running SQL
 
-/// Runs exactly one statement (rusqlite rejects anything after it) and returns its rows.
-/// Errors leave out positions: they'd point into the generated query, not at the user's filter.
-fn run_statement(conn: &rusqlite::Connection, sql: &str) -> Result<QueryResult> {
+/// Runs exactly one statement (rusqlite rejects anything after it) and returns its rows, plus the
+/// raw values at `keys` of every row (for keyset cursors). Errors leave out positions: they'd
+/// point into the generated query, not at the user's filter.
+fn run_statement(
+    conn: &rusqlite::Connection,
+    sql: &str,
+    params: &[rusqlite::types::Value],
+    keys: &[usize],
+) -> Result<(QueryResult, Vec<Vec<CursorValue>>)> {
     let unlocated = |e| match e {
         rusqlite::Error::SqlInputError { error, msg, .. } if error.code != ErrorCode::OperationInterrupted => {
             Error::Query(format!("ERROR: {msg}"))
@@ -467,11 +574,19 @@ fn run_statement(conn: &rusqlite::Connection, sql: &str) -> Result<QueryResult> 
     let mut stmt = conn.prepare(sql).map_err(unlocated)?;
     let types: Vec<String> =
         stmt.columns().iter().map(|c| c.decl_type().unwrap_or_default().to_lowercase()).collect();
-    let rows = stmt
-        .query_map([], |row| (0..types.len()).map(|i| row.get_ref(i).map(|v| decode(v, &types[i]))).collect())
-        .and_then(|rows| rows.collect::<rusqlite::Result<Vec<Vec<Value>>>>())
-        .map_err(unlocated)?;
-    Ok(QueryResult { rows, ..Default::default() })
+    // A segment may not use every key (`?N` is the N-th term): bind as many as it has.
+    let params = &params[..params.len().min(stmt.parameter_count())];
+    let mut rows = stmt.query(rusqlite::params_from_iter(params)).map_err(unlocated)?;
+    let (mut result, mut key_rows) = (QueryResult::default(), Vec::new());
+    while let Some(row) = rows.next().map_err(unlocated)? {
+        let values = (0..types.len()).map(|i| row.get_ref(i).map(|v| decode(v, &types[i]))).collect::<rusqlite::Result<_>>();
+        result.rows.push(values.map_err(unlocated)?);
+        if !keys.is_empty() {
+            let values = keys.iter().map(|&i| row.get_ref(i).map(key_value)).collect::<rusqlite::Result<_>>();
+            key_rows.push(values.map_err(unlocated)?);
+        }
+    }
+    Ok((result, key_rows))
 }
 
 /// Runs every statement in order; returns the last result set, or the changes of the last statement.

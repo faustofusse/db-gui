@@ -21,6 +21,7 @@ use tokio_postgres_rustls::MakeRustlsConnect;
 use crate::dialect::{error_chain, line_column, Dialect};
 use crate::driver::{Driver, Error, Result};
 use crate::edit::{self, EditStatement};
+use crate::keyset::{page_sql, CursorValue, Keyset, PageCursor, RowPage, SeekColumn, Start};
 use crate::model::*;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -41,7 +42,9 @@ pub struct PostgresDriver {
 
 impl PostgresDriver {
     pub fn new(config: ConnectionConfig) -> Self {
-        Self { config, browse: Session::default(), query: Session::default(), edit: Session::default(), applying: Mutex::new(()) }
+        // Floats exactly (the default on Postgres 12+), so keyset cursors can send them back.
+        let browse = Session { init: Some("set extra_float_digits = 3"), ..Session::default() };
+        Self { config, browse, query: Session::default(), edit: Session::default(), applying: Mutex::new(()) }
     }
 
     async fn browse_client(&self) -> Result<Arc<Client>> {
@@ -53,6 +56,8 @@ impl PostgresDriver {
 #[derive(Default)]
 struct Session {
     client: Mutex<Option<Arc<Client>>>,
+    /// Run once on each new connection.
+    init: Option<&'static str>,
 }
 
 impl Session {
@@ -61,7 +66,11 @@ impl Session {
         if let Some(client) = slot.as_ref().filter(|c| !c.is_closed()) {
             return Ok(client.clone());
         }
-        let client = Arc::new(connect(config).await?);
+        let client = connect(config).await?;
+        if let Some(init) = self.init {
+            client.batch_execute(init).await.map_err(|e| query_error(&e, None))?;
+        }
+        let client = Arc::new(client);
         *slot = Some(client.clone());
         Ok(client)
     }
@@ -241,39 +250,60 @@ impl Driver for PostgresDriver {
         let client = self.browse_client().await?;
         let relation = quote_relation(&table.schema, &table.name);
         let meta = TableMeta::load(&client, &relation, table).await?;
-
-        let tiebreak: Vec<String> = if !meta.primary_key.is_empty() {
-            meta.primary_key.iter().map(|c| quote_ident(c)).collect()
-        } else if meta.relkind == "r" {
-            // No primary key: physical order is stable enough for paging an idle table.
-            vec!["ctid".into()]
-        } else {
-            Vec::new()
-        };
-        let order_by = PG.order_by(&query.sort, &meta.columns, &tiebreak)?;
+        let keyset = meta.keyset(table, query)?;
         let filter = query.filter.as_deref();
-        let sql = PG.page_query(&relation, filter, &order_by, limit, offset);
+        let sql = page_sql(&relation, &[], filter, None, &keyset.order_by(), u64::from(limit), offset);
 
         // Positions would point into the generated query, not at what the user typed: leave them out.
-        let mut result = run_single(&client, &sql, false).await?;
+        let (mut result, _) = run_page(&client, &sql, &[]).await?;
         // Catalog names read better than wire type names ("timestamp with time zone" vs "timestamptz").
-        result.columns = meta.columns;
-
-        let small = meta.reltuples < EXACT_COUNT_THRESHOLD;
-        result.total_count = match meta.relkind.as_str() {
-            _ if offset > 0 => None,
-            "r" | "p" | "m" if !small && filter.is_some() => None,
-            "r" | "p" | "m" if !small => Some(meta.reltuples as u64),
-            "r" | "p" | "m" => {
-                let row = client
-                    .query_one(&PG.count_query(&relation, filter), &[])
-                    .await
-                    .map_err(|e| query_error(&e, None))?;
-                Some(row.get::<_, i64>(0) as u64)
-            }
-            _ => None,
-        };
+        result.columns = meta.columns.clone();
+        if offset == 0 {
+            result.total_count = meta.total_count(&client, &relation, filter).await?;
+        }
         Ok(result)
+    }
+
+    async fn fetch_page(&self, table: &TableInfo, query: &RowQuery, limit: u32, after: Option<&PageCursor>) -> Result<RowPage> {
+        let client = self.browse_client().await?;
+        let relation = quote_relation(&table.schema, &table.name);
+        let meta = TableMeta::load(&client, &relation, table).await?;
+        let keyset = meta.keyset(table, query)?;
+        let filter = query.filter.as_deref();
+        let width = meta.columns.len();
+        let extra: Vec<String> = keyset.columns.iter().filter(|c| c.index >= width).map(|c| c.expr.clone()).collect();
+
+        // Untyped literals: Postgres reads them as the column's type (enums, domains, tid…).
+        let start = keyset.start(after, |_, v| match v {
+            CursorValue::Text(t) => PG.quote_literal(t),
+            CursorValue::Int(i) => i.to_string(),
+            other => unreachable!("Postgres keys are text, got {other:?}"),
+        });
+        let (segments, offset) = match start {
+            Start::Offset(n) => (vec![None], n),
+            Start::Seek(segments) => (segments.into_iter().map(Some).collect(), 0),
+            Start::Empty => {
+                let result = QueryResult { columns: meta.columns, ..Default::default() };
+                return Ok(RowPage { result, next: None });
+            }
+        };
+        let (mut result, mut keys) = (QueryResult::default(), Vec::new());
+        let want = limit as usize + 1;
+        for seek in segments {
+            let need = want.saturating_sub(result.rows.len()) as u64;
+            if need == 0 {
+                break;
+            }
+            let sql = page_sql(&relation, &extra, filter, seek.as_deref(), &keyset.order_by(), need, offset);
+            let (part, part_keys) = run_page(&client, &sql, &keyset.key_indexes()).await?;
+            result.rows.extend(part.rows);
+            keys.extend(part_keys);
+        }
+        result.columns = meta.columns.clone();
+        if after.is_none() {
+            result.total_count = meta.total_count(&client, &relation, filter).await?;
+        }
+        Ok(keyset.finish(result, keys, width, limit, after))
     }
 
     async fn describe_table(&self, table: &TableInfo) -> Result<TableStructure> {
@@ -330,12 +360,24 @@ impl Driver for PostgresDriver {
 
 // MARK: Running SQL
 
-/// Runs one statement; column types come from `prepare`. `positions`: report error line/column.
-async fn run_single(client: &Client, sql: &str, positions: bool) -> Result<QueryResult> {
-    let located = positions.then_some(sql);
-    let statement = client.prepare(sql).await.map_err(|e| query_error(&e, located))?;
+/// Runs a table page query: rows decoded by their prepared types, plus the raw text of the
+/// values at `keys` in every row (sent back verbatim by keyset cursors).
+async fn run_page(client: &Client, sql: &str, keys: &[usize]) -> Result<(QueryResult, Vec<Vec<CursorValue>>)> {
+    let statement = client.prepare(sql).await.map_err(|e| query_error(&e, None))?;
     let types: Vec<Type> = statement.columns().iter().map(|c| c.type_().clone()).collect();
-    collect(client, sql, Some(&types), None, positions).await
+    let stream = client.simple_query_raw(sql).await.map_err(|e| query_error(&e, None))?;
+    pin_mut!(stream);
+    let (mut result, mut key_rows) = (QueryResult::default(), Vec::new());
+    while let Some(message) = stream.try_next().await.map_err(|e| query_error(&e, None))? {
+        if let SimpleQueryMessage::Row(row) = message {
+            result.rows.push((0..row.len()).map(|i| decode(row.get(i), types.get(i))).collect());
+            if !keys.is_empty() {
+                let text = |i: usize| row.get(i).map_or(CursorValue::Null, |t| CursorValue::Text(t.into()));
+                key_rows.push(keys.iter().map(|&i| text(i)).collect());
+            }
+        }
+    }
+    Ok((result, key_rows))
 }
 
 /// Runs a script of one or more statements and returns the last result set, or, if no
@@ -449,6 +491,8 @@ struct TableMeta {
     reltuples: f32,
     columns: Vec<ColumnInfo>,
     primary_key: Vec<String>,
+    /// Without a primary key: the smallest plain unique index on NOT NULL columns, if any.
+    unique_key: Vec<String>,
 }
 
 impl TableMeta {
@@ -476,6 +520,8 @@ impl TableMeta {
             })?;
 
         let first = rows.first().ok_or_else(|| Error::TableNotFound(table.qualified_name()))?;
+        let has_primary_key = rows.iter().any(|r| r.get::<_, bool>(5));
+        let unique_key = if has_primary_key { Vec::new() } else { unique_key(client, relation).await? };
         let columns: Vec<ColumnInfo> = rows
             .iter()
             .map(|r| ColumnInfo {
@@ -489,9 +535,68 @@ impl TableMeta {
             relkind: first.get(0),
             reltuples: first.get(1),
             primary_key: columns.iter().filter(|c| c.is_primary_key).map(|c| c.name.clone()).collect(),
+            unique_key,
             columns,
         })
     }
+
+    /// Page order: the user's sort, then the primary key, else a unique NOT NULL index, else the
+    /// physical position (`ctid`, stable enough for paging an idle table or matview). Views,
+    /// foreign tables and keyless partitioned tables have no unique tiebreak and page with OFFSET.
+    fn keyset(&self, table: &TableInfo, query: &RowQuery) -> Result<Keyset> {
+        let key = if self.primary_key.is_empty() { &self.unique_key } else { &self.primary_key };
+        let tiebreak: Vec<SeekColumn> = if !key.is_empty() {
+            key.iter().filter_map(|c| SeekColumn::column(PG, &self.columns, c)).collect()
+        } else if matches!(self.relkind.as_str(), "r" | "m") {
+            vec![SeekColumn::row_id("ctid", self.columns.len())]
+        } else {
+            Vec::new()
+        };
+        let enabled = !tiebreak.is_empty();
+        Keyset::new(PG, table, query, &self.columns, tiebreak, enabled)
+    }
+
+    /// Exact for small tables, the planner's estimate for big unfiltered ones, else unknown.
+    async fn total_count(&self, client: &Client, relation: &str, filter: Option<&str>) -> Result<Option<u64>> {
+        let small = self.reltuples < EXACT_COUNT_THRESHOLD;
+        Ok(match self.relkind.as_str() {
+            "r" | "p" | "m" if !small && filter.is_some() => None,
+            "r" | "p" | "m" if !small => Some(self.reltuples as u64),
+            "r" | "p" | "m" => {
+                let row = client
+                    .query_one(&PG.count_query(relation, filter), &[])
+                    .await
+                    .map_err(|e| query_error(&e, None))?;
+                Some(row.get::<_, i64>(0) as u64)
+            }
+            _ => None,
+        })
+    }
+}
+
+/// Columns of the plain (no expressions, not partial), valid unique index with the fewest key
+/// columns, all NOT NULL: a unique tiebreak for paging tables without a primary key.
+async fn unique_key(client: &Client, relation: &str) -> Result<Vec<String>> {
+    let row = client
+        .query_opt(
+            r"
+            select array(select a.attname from generate_series(0, i.indnkeyatts - 1) k
+                         join pg_attribute a on a.attrelid = i.indrelid and a.attnum = i.indkey[k]
+                         order by k)
+            from pg_index i
+            where i.indrelid = $1::text::regclass and i.indisunique and i.indisvalid
+              and i.indpred is null and i.indexprs is null
+              and not exists (select 1 from generate_series(0, i.indnkeyatts - 1) k
+                              join pg_attribute a on a.attrelid = i.indrelid and a.attnum = i.indkey[k]
+                              where not a.attnotnull)
+            order by i.indnkeyatts, i.indexrelid
+            limit 1
+            ",
+            &[&relation],
+        )
+        .await
+        .map_err(|e| query_error(&e, None))?;
+    Ok(row.map(|r| r.get(0)).unwrap_or_default())
 }
 
 // MARK: Structure

@@ -12,6 +12,7 @@ pub mod driver;
 pub mod edit;
 pub mod highlight;
 pub mod import;
+pub mod keyset;
 pub mod mock;
 pub mod model;
 pub mod mysql;
@@ -21,5 +22,6 @@ pub mod store;
 
 pub use connection::Connection;
 pub use driver::{Driver, Error, Result};
+pub use keyset::{PageCursor, RowPage};
 pub use model::*;
 pub use store::ConnectionStore;
