@@ -52,6 +52,17 @@ private func tempStorePath() -> String {
     #expect(DatabaseKind.postgres.defaultPort == 5432)
 }
 
+@Test func parsesSqlServerURL() throws {
+    let c = try ConnectionConfig.parse(url: "sqlserver://sa@db.example.com:14339/app_dev?encrypt=true&trustServerCertificate=true")
+    #expect(c.kind == .sqlServer && c.port == 14339 && c.database == "app_dev" && c.sslMode == .require)
+    #expect(c.supportsMultipleDatabases && c.kind.displayName == "SQL Server")
+    #expect(c.url() == "sqlserver://sa@db.example.com:14339/app_dev?sslmode=require")
+    #expect(DatabaseKind.sqlServer.defaultPort == 1433)
+    var blank = c
+    blank.database = ""
+    #expect(blank.defaultDatabase == "master")
+}
+
 @Test func inMemorySecrets() throws {
     let secrets = InMemorySecretStore()
     try secrets.setPassword("x", for: "a")

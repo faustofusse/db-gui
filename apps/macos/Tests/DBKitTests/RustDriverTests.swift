@@ -19,7 +19,7 @@ private var devSQLite: ConnectionConfig { connections.first { $0.id == "local-sq
 private let sqliteSeeded = FileManager.default.fileExists(atPath: Drivers.sampleConnections().first { $0.id == "local-sqlite" }!.database)
 
 @Test func loadsSampleConnectionsWithSummary() {
-    #expect(connections.count == 7)
+    #expect(connections.count == 8)
     #expect(devDB.summary == "PostgreSQL · localhost:54329/app_dev")
     #expect(devDB.password == "postgres" && devDB.sslMode == .prefer)
 }

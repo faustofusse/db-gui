@@ -174,13 +174,23 @@ struct ConnectionEditor: View {
         return draft.showAllDatabases ? "Optional (all databases)" : "Optional"
     }
 
+    /// The user each engine logs in as by default.
+    private var userPrompt: String {
+        switch draft.kind {
+        case .mysql: "root"
+        case .sqlServer: "sa"
+        default: "postgres"
+        }
+    }
+
     private var authSection: some View {
         Section {
-            TextField("User", text: userBinding, prompt: Text(verbatim: draft.kind == .mysql ? "root" : "postgres"))
+            TextField("User", text: userBinding, prompt: Text(verbatim: userPrompt))
             SecureField("Password", text: $password, prompt: Text(passwordPrompt))
                 .onChange(of: password) { passwordEdited = true }
             Picker("SSL", selection: $draft.sslMode) {
-                Text("Disable").tag(SslMode.disable)
+                // SQL Server always encrypts the login; "disable" leaves only the rest in the clear.
+                Text(draft.kind == .sqlServer ? "Login Only" : "Disable").tag(SslMode.disable)
                 Text("Prefer").tag(SslMode.prefer)
                 Text("Require").tag(SslMode.require)
                 Text("Verify Certificate").tag(SslMode.verifyFull)

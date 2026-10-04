@@ -146,7 +146,7 @@ struct TablesList: View {
         // A MySQL connection browses one database: its only section is the database itself.
         if model.selectedTarget?.kind == .mysql, schemas.count == 1 { return count(tables, "table") }
         // Without a database, MySQL lists every database as a section; SQLite's are attached databases.
-        let section = model.selectedTarget?.kind == .postgres ? "schema" : "database"
+        let section = [.postgres, .sqlServer].contains(model.selectedTarget?.kind) ? "schema" : "database"
         return "\(count(schemas.count, section)), \(count(tables, "table"))"
     }
 

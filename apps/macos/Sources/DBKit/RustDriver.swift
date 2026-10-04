@@ -128,6 +128,7 @@ extension DatabaseKind {
         case .mysql: self = .mysql
         case .sqlite: self = .sqlite
         case .libsql: self = .libsql
+        case .sqlServer: self = .sqlServer
         }
     }
 }
@@ -139,6 +140,7 @@ extension DBCoreFFI.DatabaseKind {
         case .mysql: self = .mysql
         case .sqlite: self = .sqlite
         case .libsql: self = .libsql
+        case .sqlServer: self = .sqlServer
         }
     }
 }

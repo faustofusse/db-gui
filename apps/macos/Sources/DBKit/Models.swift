@@ -6,6 +6,7 @@ public enum DatabaseKind: String, Sendable, Hashable, CaseIterable {
     case sqlite
     /// Turso / libSQL server (remote, auth token instead of user and password).
     case libsql
+    case sqlServer
 
     public var displayName: String {
         switch self {
@@ -13,6 +14,7 @@ public enum DatabaseKind: String, Sendable, Hashable, CaseIterable {
         case .mysql: "MySQL"
         case .sqlite: "SQLite"
         case .libsql: "Turso"
+        case .sqlServer: "SQL Server"
         }
     }
 }
@@ -62,8 +64,8 @@ public struct ConnectionConfig: Identifiable, Hashable, Sendable {
     }
 
     /// The server's other databases can be switched to (the tables column's title menu), each with
-    /// its own session (Postgres, MySQL). SQLite files have none.
-    public var supportsMultipleDatabases: Bool { kind == .postgres || kind == .mysql }
+    /// its own session (Postgres, MySQL, SQL Server). SQLite files have none.
+    public var supportsMultipleDatabases: Bool { [.postgres, .mysql, .sqlServer].contains(kind) }
 }
 
 public enum TableKind: String, Sendable, Hashable {
