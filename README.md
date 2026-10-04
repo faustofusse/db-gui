@@ -20,6 +20,15 @@ In debug builds, **File ▸ Add Sample Connections** adds `app_dev` plus some mo
 `./scripts/release-mac.sh 0.1.0` builds `build/dbear-0.1.0-macos-arm64.zip`. Add `--publish` to tag
 `v0.1.0`, push the tag and create the GitHub release with the zip attached (needs a clean tree and `gh`).
 
+### Updates
+
+The app updates itself with [Sparkle](https://sparkle-project.org): it checks daily, downloads and
+verifies updates in the background and installs them on quit, without popups (a "Restart to
+Update" item appears in the app menu). Settings (⌘,) turns this off. The feed is the `appcast.xml`
+asset of the latest GitHub release, written by `release-mac.sh` and signed with the EdDSA key in
+the release Mac's keychain (public half: `DBEAR_SPARKLE_PUBLIC_KEY` in `bundle-mac.sh`; until it's
+set, the updater stays off). `scripts/test-update.sh` runs a full update against a local feed.
+
 ### Without Nix
 
 You don't need Nix; it just pins the exact toolchain. Install equivalents yourself:

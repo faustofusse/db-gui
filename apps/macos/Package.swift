@@ -9,6 +9,10 @@ let package = Package(
     products: [
         .executable(name: "dbear", targets: ["dbear"]),
     ],
+    dependencies: [
+        // Auto-update (app only; DBKit and the tests don't link it).
+        .package(url: "https://github.com/sparkle-project/Sparkle", .upToNextMinor(from: "2.10.0")),
+    ],
     targets: [
         // Rust static library + C header (generated).
         .binaryTarget(name: "DBCoreFFIBinary", path: "Frameworks/DBCoreFFI.xcframework"),
@@ -22,7 +26,10 @@ let package = Package(
         ),
         // Swift-facing models + DatabaseDriver protocol; adapts the generated API.
         .target(name: "DBKit", dependencies: ["DBCoreFFI"]),
-        .executableTarget(name: "dbear", dependencies: ["DBKit"]),
+        .executableTarget(
+            name: "dbear",
+            dependencies: ["DBKit", .product(name: "Sparkle", package: "Sparkle")]
+        ),
         .testTarget(name: "DBKitTests", dependencies: ["DBKit"]),
     ]
 )

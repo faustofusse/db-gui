@@ -5,6 +5,7 @@ import SwiftUI
 struct DbearApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var model = AppModel()
+    @State private var updater = Updater()
 
     init() {
         ThinScrollers.install()
@@ -17,7 +18,12 @@ struct DbearApp: App {
                 .frame(minWidth: 900, minHeight: 500)
         }
         .defaultSize(width: 1400, height: 880)
-        .commands { AppCommands(model: model) }
+        .commands {
+            AppCommands(model: model)
+            UpdateCommands(updater: updater)
+        }
+
+        Settings { SettingsView(updater: updater) }
     }
 }
 
