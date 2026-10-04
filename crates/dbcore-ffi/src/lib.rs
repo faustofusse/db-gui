@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 
 uniffi::setup_scaffolding!();
 
+mod dump;
 mod import;
 
 // MARK: Records & enums

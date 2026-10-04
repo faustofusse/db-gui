@@ -22,6 +22,9 @@ struct ContentView: View {
         .sheet(isPresented: $model.showingImport) {
             ImportConnectionsSheet()
         }
+        .sheet(item: $model.dumpRequest) { DumpSheet(request: $0) }
+        .sheet(item: $model.restoreRequest) { RestoreSheet(request: $0) }
+        .overlay(alignment: .bottomTrailing) { BackupJobsPanel() }
         .confirmationDialog(
             "Delete “\(model.pendingDeletion?.name ?? "")”?",
             isPresented: Binding(get: { model.pendingDeletion != nil }, set: { if !$0 { model.pendingDeletion = nil } }),

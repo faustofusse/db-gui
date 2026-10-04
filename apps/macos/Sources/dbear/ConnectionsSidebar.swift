@@ -90,6 +90,9 @@ struct ConnectionsSidebar: View {
             Button("Refresh Databases") { Task { await model.loadDatabases(connection) } }
         }
         Divider()
+        Button("Dump Database…") { model.requestDump(of: connection) }
+        Button("Restore from File…") { model.requestRestore(into: connection) }
+        Divider()
         Button("Edit…") { model.edit(connection) }
         Button("Duplicate") { model.duplicate(connection) }
         Button("Copy URL") {

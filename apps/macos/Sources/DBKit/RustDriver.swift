@@ -393,3 +393,93 @@ extension QueryResult {
         )
     }
 }
+
+// MARK: - Dump & restore
+
+extension RustDriver {
+    static func dump(
+        _ config: ConnectionConfig, to url: URL, options: DumpOptions, cancellation: BackupCancellation,
+        progress: @escaping @Sendable (DumpProgress) -> Void
+    ) async throws -> DumpSummary {
+        let handle = DBCoreFFI.CancelHandle()
+        cancellation.onCancel { handle.cancel() }
+        do {
+            let summary = try await DBCoreFFI.dumpDatabase(
+                config: DBCoreFFI.ConnectionConfig(config), path: url.path, options: DBCoreFFI.DumpOptions(options),
+                listener: DumpListenerBox(progress), cancel: handle)
+            return DumpSummary(tables: Int(summary.tables), rows: Int(clamping: summary.rows),
+                               bytes: Int(clamping: summary.bytes), warnings: summary.warnings)
+        } catch let error as DBCoreFFI.DbError {
+            throw DatabaseError(error)
+        }
+    }
+
+    static func restore(
+        _ config: ConnectionConfig, from url: URL, options: RestoreOptions, cancellation: BackupCancellation,
+        progress: @escaping @Sendable (RestoreProgress) -> Void
+    ) async throws -> RestoreSummary {
+        let handle = DBCoreFFI.CancelHandle()
+        cancellation.onCancel { handle.cancel() }
+        do {
+            let s = try await DBCoreFFI.restoreDatabase(
+                config: DBCoreFFI.ConnectionConfig(config), path: url.path,
+                options: DBCoreFFI.RestoreOptions(singleTransaction: options.singleTransaction, stopOnError: options.stopOnError),
+                listener: RestoreListenerBox(progress), cancel: handle)
+            return RestoreSummary(statements: Int(clamping: s.statements), rows: Int(clamping: s.rows), errors: s.errors,
+                                  errorCount: Int(s.errorCount), warnings: s.warnings)
+        } catch let error as DBCoreFFI.DbError {
+            throw DatabaseError(error)
+        }
+    }
+
+    static func defaultDumpFileName(database: String, date: String, compression: DumpCompression) -> String {
+        DBCoreFFI.defaultDumpFileName(database: database, date: date, compression: compression == .gzip ? .gzip : .none)
+    }
+}
+
+private final class DumpListenerBox: DBCoreFFI.DumpListener, @unchecked Sendable {
+    let handler: @Sendable (DumpProgress) -> Void
+    init(_ handler: @escaping @Sendable (DumpProgress) -> Void) { self.handler = handler }
+
+    func onProgress(progress p: DBCoreFFI.DumpProgress) {
+        let phase: DumpPhase = switch p.phase {
+        case .connecting: .connecting
+        case .schema: .schema
+        case .data: .data
+        case .postData: .postData
+        case .finishing: .finishing
+        }
+        handler(DumpProgress(
+            phase: phase, object: p.object, tablesDone: Int(p.tablesDone), tablesTotal: Int(p.tablesTotal),
+            rowsDone: Int(clamping: p.rowsDone), tableRowsDone: Int(clamping: p.tableRowsDone),
+            tableRowsEstimate: p.tableRowsEstimate.map { Int(clamping: $0) }, bytesWritten: Int(clamping: p.bytesWritten)))
+    }
+}
+
+private final class RestoreListenerBox: DBCoreFFI.RestoreListener, @unchecked Sendable {
+    let handler: @Sendable (RestoreProgress) -> Void
+    init(_ handler: @escaping @Sendable (RestoreProgress) -> Void) { self.handler = handler }
+
+    func onProgress(progress p: DBCoreFFI.RestoreProgress) {
+        handler(RestoreProgress(bytesRead: Int(clamping: p.bytesRead), bytesTotal: Int(clamping: p.bytesTotal),
+                                statements: Int(clamping: p.statements), errors: Int(p.errors)))
+    }
+}
+
+extension DBCoreFFI.DumpOptions {
+    init(_ o: DumpOptions) {
+        let content: DBCoreFFI.DumpContent = switch o.content {
+        case .schemaAndData: .schemaAndData
+        case .schemaOnly: .schemaOnly
+        case .dataOnly: .dataOnly
+        }
+        let scope: DBCoreFFI.DumpScope = switch o.scope {
+        case .database: .database
+        case .schemas(let names): .schemas(schemas: names)
+        case .tables(let tables): .tables(tables: tables.map(DBCoreFFI.TableInfo.init))
+        }
+        self.init(
+            content: content, scope: scope, compression: o.compression == .gzip ? .gzip : .none,
+            dataStyle: o.dataStyle == .insert ? .insert : .copy, dropObjects: o.dropObjects, createDatabase: o.createDatabase)
+    }
+}

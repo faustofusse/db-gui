@@ -258,6 +258,10 @@ final class AppModel {
     var showingImport = false
     /// Connection waiting for delete confirmation.
     var pendingDeletion: ConnectionConfig?
+    /// Dumps and restores (see `AppModel+Backup.swift`).
+    var dumpRequest: DumpRequest?
+    var restoreRequest: RestoreRequest?
+    let backups = BackupCenter()
 
     private let store: ConnectionStore?
     private let secrets: any SecretStore
@@ -273,6 +277,8 @@ final class AppModel {
             self.store = nil
             storeError = error.localizedDescription
         }
+        // A restore may have created or dropped tables.
+        backups.onRestored = { [weak self] target in Task { await self?.schemaMayHaveChanged(target) } }
     }
     var selectedConnectionID: ConnectionConfig.ID? {
         // Show the new connection's cached tables, or a spinner (never the previous connection's).

@@ -49,6 +49,11 @@ struct TablesList: View {
 
                     Menu {
                         Button("Refresh") { Task { await model.loadSchemas(refresh: true) } }
+                        if let connection = model.selectedConnection {
+                            Divider()
+                            Button("Dump Database…") { model.requestDump(of: connection) }
+                            Button("Restore from File…") { model.requestRestore(into: connection) }
+                        }
                         // A single MySQL database has no sections to fold.
                         if singleDatabase(in: model.schemas.value ?? []) == nil {
                             Divider()
@@ -132,6 +137,9 @@ struct TablesList: View {
             })
             .contextMenu {
                 Button("Open in New Tab") { model.openTable(table, pinned: true) }
+                if let connection = model.selectedConnection {
+                    Button("Dump “\(table.name)”…") { model.requestDump(of: connection, preset: .table(table)) }
+                }
             }
     }
 
@@ -179,6 +187,13 @@ struct TablesList: View {
                                 ForEach(visibleTables(in: schema)) { table in tableRow(table) }
                             } header: {
                                 Text(schema.name)
+                                    .contextMenu {
+                                        if let connection = model.selectedConnection {
+                                            Button("Dump Schema “\(schema.name)”…") {
+                                                model.requestDump(of: connection, preset: .schema(schema.name))
+                                            }
+                                        }
+                                    }
                             }
                         }
                     }
