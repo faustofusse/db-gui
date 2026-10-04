@@ -26,8 +26,8 @@ The app updates itself with [Sparkle](https://sparkle-project.org): it checks da
 verifies updates in the background and installs them on quit, without popups (a "Restart to
 Update" item appears in the app menu). Settings (⌘,) turns this off. The feed is the `appcast.xml`
 asset of the latest GitHub release, written by `release-mac.sh` and signed with the EdDSA key in
-the release Mac's keychain (public half: `DBEAR_SPARKLE_PUBLIC_KEY` in `bundle-mac.sh`; until it's
-set, the updater stays off). `scripts/test-update.sh` runs a full update against a local feed.
+the release Mac's keychain (public half: `DBEAR_SPARKLE_PUBLIC_KEY` in `bundle-mac.sh`; if it's empty,
+the updater stays off). `scripts/test-update.sh` runs a full update against a local feed.
 
 ### Without Nix
 
