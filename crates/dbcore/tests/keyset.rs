@@ -5,7 +5,9 @@
 //! SQLite always runs (temp file). Postgres and MySQL run with `DBEAR_TEST_POSTGRES=1` /
 //! `DBEAR_TEST_MYSQL=1` against the dev databases, in a scratch `dbear_keyset` schema/database
 //! that is dropped afterwards. Turso / libSQL runs with `DBEAR_TEST_LIBSQL=1` against the dev
-//! libSQL server, in `dbear_keyset_*` tables that are dropped afterwards.
+//! libSQL server, in `dbear_keyset_*` tables that are dropped afterwards. SQL Server runs with
+//! `DBEAR_TEST_SQLSERVER=1` against the dev SQL Server, in a scratch `dbear_keyset` schema of
+//! `app_dev` that is dropped afterwards.
 
 use dbcore::{mock, Connection, ConnectionConfig, DatabaseKind, PageCursor, RowQuery, SortKey, TableInfo, Value};
 
@@ -305,4 +307,61 @@ fn libsql_keyset_matches_offset() {
     check_table(&conn, &view, &SORT_COLUMNS, false, |_| false);
 
     drop_all();
+}
+
+// MARK: SQL Server
+
+#[test]
+fn sqlserver_keyset_matches_offset() {
+    if !env_on("DBEAR_TEST_SQLSERVER") {
+        return;
+    }
+    let config = mock::connections().into_iter().find(|c| c.id == mock::DEV_SQLSERVER).unwrap();
+    let conn = Connection::new(config);
+    let values = data_rows(|hex| format!("0x{hex}"), |k| format!("{k} / 3e0")).join(", ");
+    let columns = "a int, b nvarchar(10), c datetime2(0), d decimal(6,2), e float, g varbinary(8)";
+    let drop_all = "if schema_id('dbear_keyset') is not null begin
+           drop view if exists dbear_keyset.v;
+           drop table if exists dbear_keyset.main_t, dbear_keyset.pair, dbear_keyset.uniq, dbear_keyset.heap;
+           drop schema dbear_keyset;
+         end";
+    block_on(conn.execute(format!(
+        "{drop_all}
+         GO
+         create schema dbear_keyset
+         GO
+         -- v (varchar, compared without N''), l (legacy datetime) and u seek; r (real) and m (max) can't.
+         create table dbear_keyset.main_t (id int primary key, {columns},
+           v varchar(10), l datetime, u uniqueidentifier, r real, m nvarchar(max));
+         insert into dbear_keyset.main_t (id, a, b, c, d, e, g) values {values};
+         update dbear_keyset.main_t set v = b, l = c, r = e, m = b,
+           u = case when id % 3 = 0 then null else cast(hashbytes('MD5', cast(id % 11 as varchar)) as uniqueidentifier) end;
+         create table dbear_keyset.pair (x int, y nvarchar(10), {columns}, primary key (x, y));
+         insert into dbear_keyset.pair select id % 5, concat('k', id), a, b, c, d, e, g from dbear_keyset.main_t;
+         -- No primary key: the NOT NULL unique index is the tiebreak; the filtered one doesn't qualify.
+         create table dbear_keyset.uniq (n int, u2 int not null, {columns});
+         create unique index ux_n on dbear_keyset.uniq (n) where n is not null;
+         create unique index ux_u2 on dbear_keyset.uniq (u2);
+         insert into dbear_keyset.uniq select case when id % 2 = 0 then id end, 1000 - id, a, b, c, d, e, g from dbear_keyset.main_t;
+         create table dbear_keyset.heap ({columns});
+         insert into dbear_keyset.heap select a, b, c, d, e, g from dbear_keyset.main_t;
+         GO
+         create view dbear_keyset.v as select * from dbear_keyset.main_t;"
+    )))
+    .unwrap();
+
+    let t = |name: &str| TableInfo::new("dbear_keyset", name);
+    let mut all_columns = SORT_COLUMNS.to_vec();
+    all_columns.extend(["v", "l", "u", "r", "m"]);
+    let seekable = |q: &RowQuery| !q.sort.iter().any(|k| ["r", "m"].contains(&k.column.as_str()));
+    check_table(&conn, &t("main_t"), &all_columns, true, seekable);
+    check_table(&conn, &t("pair"), &SORT_COLUMNS, true, |_| true);
+    check_table(&conn, &t("uniq"), &SORT_COLUMNS, true, |_| true);
+    // No key at all: OFFSET, in no particular order.
+    check_table(&conn, &t("heap"), &SORT_COLUMNS, false, |_| false);
+    let mut view = t("v");
+    view.kind = dbcore::TableKind::View;
+    check_table(&conn, &view, &SORT_COLUMNS, false, |_| false);
+
+    block_on(conn.execute(drop_all.into())).unwrap();
 }

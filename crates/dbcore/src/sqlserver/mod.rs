@@ -12,6 +12,7 @@
 
 mod decode;
 mod describe;
+mod paging;
 pub mod script;
 
 use std::future::Future;
@@ -29,6 +30,7 @@ use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 use crate::dialect::{error_chain, Dialect};
 use crate::driver::{Driver, Error, Result};
 use crate::edit::{self, EditStatement};
+use crate::keyset::{CursorValue, Keyset, PageCursor, RowPage, SeekColumn, Start};
 use crate::model::*;
 
 use self::script::{check_filter, format_error, split_batches};
@@ -195,9 +197,21 @@ impl Lease<'_> {
         Ok(sets.into_iter().map(|rows| rows.iter().map(|r| r.cells().map(|(_, d)| decode::value(d)).collect()).collect()).collect())
     }
 
+    /// Runs a page query: its rows, and the values at `key_indexes` of each row (for cursors).
+    async fn page(&mut self, sql: &str, key_indexes: &[usize]) -> Result<(QueryResult, Vec<Vec<CursorValue>>)> {
+        match run_batch(self.client(), sql, None, None, key_indexes).await {
+            Ok(ran) => {
+                self.done();
+                Ok((ran.rows.unwrap_or_default(), ran.keys))
+            }
+            Err(Run::Cancelled) => unreachable!("no cancel signal"),
+            Err(Run::Failed(e)) => Err(query_error(&self.check(Err::<(), _>(e)).unwrap_err(), 1)),
+        }
+    }
+
     /// Runs a batch without result rows; returns the last row count it reported.
     async fn exec(&mut self, sql: &str) -> Result<Option<u64>> {
-        let result = run_batch(self.client(), sql, Some(0), None).await;
+        let result = run_batch(self.client(), sql, Some(0), None, &[]).await;
         match result {
             Ok(ran) => {
                 self.done();
@@ -392,33 +406,55 @@ impl Driver for SqlServerDriver {
         let mut lease = self.browse.lease(&self.config).await?;
         let meta = TableMeta::load(&mut lease, table).await?;
         let relation = MSSQL.quote_relation(&table.schema, &table.name);
-        let order_by = MSSQL.order_by(&query.sort, &meta.columns, &meta.tiebreak)?;
+        // Same order as `fetch_page`, so OFFSET and keyset pages agree.
+        let (keyset, _) = meta.keyset(table, query)?;
         let filter = query.filter.as_deref();
-        let sql = MSSQL.page_query(&relation, filter, &order_by, limit, offset);
-
-        let ran = run_batch(lease.client(), &sql, None, None).await;
-        let mut result = match ran {
-            Ok(ran) => {
-                lease.done();
-                ran.rows.unwrap_or_default()
-            }
-            Err(Run::Cancelled) => unreachable!("no cancel signal"),
-            Err(Run::Failed(e)) => return Err(query_error(&lease.check(Err::<(), _>(e)).unwrap_err(), 1)),
-        };
-        result.columns = meta.columns;
-
-        result.total_count = match meta.estimated_rows {
-            _ if offset > 0 => None,
-            None => None,
-            Some(rows) if rows >= EXACT_COUNT_THRESHOLD && filter.is_some() => None,
-            Some(rows) if rows >= EXACT_COUNT_THRESHOLD => Some(rows),
-            Some(_) => {
-                let where_clause = filter.map_or(String::new(), |f| format!(" where (\n{f}\n)"));
-                let rows = lease.rows(&format!("select count_big(*) from {relation}{where_clause}")).await?;
-                rows.first().and_then(|r| int(r, 0)).map(|n| n.max(0) as u64)
-            }
-        };
+        let sql = paging::page_sql(&relation, filter, None, &keyset.order_by(), u64::from(limit), offset);
+        let (mut result, _) = lease.page(&sql, &[]).await?;
+        result.columns = meta.columns.clone();
+        if offset == 0 {
+            result.total_count = meta.total_count(&mut lease, &relation, filter).await?;
+        }
         Ok(result)
+    }
+
+    /// Seeks past the last row's sort key when the table has a unique NOT NULL key (primary key or
+    /// unique index) and every sort column compares the way it sorts; otherwise OFFSET.
+    async fn fetch_page(&self, table: &TableInfo, query: &RowQuery, limit: u32, after: Option<&PageCursor>) -> Result<RowPage> {
+        if let Some(filter) = query.filter.as_deref() {
+            check_filter(filter)?;
+        }
+        let mut lease = self.browse.lease(&self.config).await?;
+        let meta = TableMeta::load(&mut lease, table).await?;
+        let relation = MSSQL.quote_relation(&table.schema, &table.name);
+        let (keyset, kinds) = meta.keyset(table, query)?;
+        let filter = query.filter.as_deref();
+
+        let (segments, offset) = match keyset.start(after, |i, v| paging::render_key(kinds[i], v)) {
+            Start::Offset(n) => (vec![None], n),
+            Start::Seek(segments) => (segments.into_iter().map(Some).collect(), 0),
+            Start::Empty => {
+                let result = QueryResult { columns: meta.columns, ..Default::default() };
+                return Ok(RowPage { result, next: None });
+            }
+        };
+        let (mut result, mut keys) = (QueryResult::default(), Vec::new());
+        let want = limit as usize + 1;
+        for seek in segments {
+            let need = want.saturating_sub(result.rows.len()) as u64;
+            if need == 0 {
+                break;
+            }
+            let sql = paging::page_sql(&relation, filter, seek.as_deref(), &keyset.order_by(), need, offset);
+            let (part, part_keys) = lease.page(&sql, &keyset.key_indexes()).await?;
+            result.rows.extend(part.rows);
+            keys.extend(part_keys);
+        }
+        result.columns = meta.columns.clone();
+        if after.is_none() {
+            result.total_count = meta.total_count(&mut lease, &relation, filter).await?;
+        }
+        Ok(keyset.finish(result, keys, meta.columns.len(), limit, after))
     }
 
     async fn describe_table(&self, table: &TableInfo) -> Result<TableStructure> {
@@ -439,7 +475,7 @@ impl Driver for SqlServerDriver {
                 if self.cancel.is_requested() {
                     return Err(Error::Cancelled);
                 }
-                match run_batch(lease.client(), &batch.sql, max_rows, Some(&self.cancel)).await {
+                match run_batch(lease.client(), &batch.sql, max_rows, Some(&self.cancel), &[]).await {
                     Ok(ran) => {
                         lease.done();
                         if ran.rows.is_some() {
@@ -515,6 +551,8 @@ struct Ran {
     rows: Option<QueryResult>,
     /// The last row count the server reported (DONE tokens).
     affected: Option<u64>,
+    /// Sort-key values of each kept row of the last result set (`key_indexes` of `run_batch`).
+    keys: Vec<Vec<CursorValue>>,
 }
 
 enum Run {
@@ -538,16 +576,27 @@ async fn or_cancel<T>(signal: Option<&CancelSignal>, future: impl Future<Output 
 }
 
 /// Runs one SQL batch. Rows past `max_rows` are counted, not kept; the stream is drained so later
-/// statements still run. A server error anywhere in the batch fails it.
-async fn run_batch(client: &mut Client, sql: &str, max_rows: Option<u32>, cancel: Option<&CancelSignal>) -> std::result::Result<Ran, Run> {
+/// statements still run. A server error anywhere in the batch fails it. The wire values at
+/// `key_indexes` are kept too, exactly, for keyset cursors.
+async fn run_batch(
+    client: &mut Client,
+    sql: &str,
+    max_rows: Option<u32>,
+    cancel: Option<&CancelSignal>,
+    key_indexes: &[usize],
+) -> std::result::Result<Ran, Run> {
     let max_rows = max_rows.map_or(usize::MAX, |m| m as usize);
     let mut stream = or_cancel(cancel, client.simple_query(sql)).await?;
     let mut current: Option<QueryResult> = None;
     let mut last_rows: Option<QueryResult> = None;
+    let (mut keys, mut last_keys) = (Vec::new(), Vec::new());
     while let Some(item) = or_cancel(cancel, stream.try_next()).await? {
         match item {
             QueryItem::Metadata(meta) => {
-                last_rows = current.take().or(last_rows);
+                if let Some(done) = current.take() {
+                    last_rows = Some(done);
+                    last_keys = std::mem::take(&mut keys);
+                }
                 current = Some(QueryResult {
                     columns: meta
                         .columns()
@@ -565,6 +614,10 @@ async fn run_batch(client: &mut Client, sql: &str, max_rows: Option<u32>, cancel
             QueryItem::Row(row) => {
                 let Some(result) = current.as_mut() else { continue };
                 if result.rows.len() < max_rows {
+                    if !key_indexes.is_empty() {
+                        let cells: Vec<_> = row.cells().map(|(_, data)| data).collect();
+                        keys.push(key_indexes.iter().map(|&i| cells.get(i).map_or(CursorValue::Null, |d| paging::key_value(d))).collect());
+                    }
                     result.rows.push(row.cells().map(|(_, data)| decode::value(data)).collect());
                 } else {
                     result.truncated = true;
@@ -574,16 +627,20 @@ async fn run_batch(client: &mut Client, sql: &str, max_rows: Option<u32>, cancel
         }
     }
     let affected = stream.rows_affected().last().copied();
-    Ok(Ran { rows: current.or(last_rows), affected })
+    let (rows, keys) = match current {
+        Some(current) => (Some(current), keys),
+        None => (last_rows, last_keys),
+    };
+    Ok(Ran { rows, affected, keys })
 }
 
 // MARK: Table metadata
 
 struct TableMeta {
     columns: Vec<ColumnInfo>,
-    /// Quoted columns appended to every sort so pages are stable: the primary key, else a unique
-    /// index on NOT NULL columns, else nothing (`order by (select null)`).
-    tiebreak: Vec<String>,
+    /// Columns appended to every sort so pages are stable: the primary key, else a unique index on
+    /// NOT NULL columns, else nothing (`order by (select null)`, OFFSET paging only).
+    key: Vec<String>,
     /// `sys.partitions` row count for tables; `None` for views.
     estimated_rows: Option<u64>,
     is_view: bool,
@@ -614,21 +671,21 @@ impl TableMeta {
 
         let mut primary_key: Vec<&describe::ColumnRow> = column_rows.iter().filter(|c| c.pk_ordinal > 0).collect();
         primary_key.sort_by_key(|c| c.pk_ordinal);
-        let tiebreak = if !primary_key.is_empty() {
-            primary_key.iter().map(|c| MSSQL.quote_ident(&c.name)).collect()
+        let key = if !primary_key.is_empty() {
+            primary_key.iter().map(|c| c.name.clone()).collect()
         } else {
             best_unique_index(&sets.next().unwrap_or_default())
         };
         Ok(Self {
             columns,
-            tiebreak,
+            key,
             estimated_rows: if is_view { None } else { Some(int(info, 1).unwrap_or(0).max(0) as u64) },
             is_view,
         })
     }
 }
 
-/// The unique index with the fewest columns whose key columns are all NOT NULL, quoted
+/// The unique index with the fewest columns whose key columns are all NOT NULL
 /// (rows: index id, column, is nullable — in key order).
 fn best_unique_index(rows: &[Vec<Value>]) -> Vec<String> {
     let mut indexes: Vec<(i64, Vec<String>, bool)> = Vec::new();
@@ -638,10 +695,38 @@ fn best_unique_index(rows: &[Vec<Value>]) -> Vec<String> {
             indexes.push((id, Vec::new(), false));
         }
         let index = indexes.last_mut().expect("pushed above");
-        index.1.push(MSSQL.quote_ident(&text(row, 1)));
+        index.1.push(text(row, 1));
         index.2 |= flag(row, 2);
     }
     indexes.into_iter().filter(|(_, _, nullable)| !nullable).min_by_key(|(id, cols, _)| (cols.len(), *id)).map(|(_, c, _)| c).unwrap_or_default()
+}
+
+impl TableMeta {
+    /// Page order: the user's sort, then the key. Seeking needs the key and sort types whose
+    /// comparison agrees with their order (see [`paging::key_kind`]); also returns how to spell
+    /// each term's values.
+    fn keyset(&self, table: &TableInfo, query: &RowQuery) -> Result<(Keyset, Vec<paging::KeyKind>)> {
+        let tiebreak: Vec<SeekColumn> = self.key.iter().filter_map(|c| SeekColumn::column(MSSQL, &self.columns, c)).collect();
+        let mut keyset = Keyset::new(MSSQL, table, query, &self.columns, tiebreak, !self.key.is_empty())?;
+        let kinds: Option<Vec<paging::KeyKind>> =
+            keyset.columns.iter().map(|c| paging::key_kind(&self.columns[c.index].type_name)).collect();
+        keyset.enabled &= kinds.is_some();
+        Ok((keyset, kinds.unwrap_or_default()))
+    }
+
+    /// Exact for small tables, `sys.partitions` for big unfiltered ones, else unknown (views too).
+    async fn total_count(&self, lease: &mut Lease<'_>, relation: &str, filter: Option<&str>) -> Result<Option<u64>> {
+        Ok(match self.estimated_rows {
+            None => None,
+            Some(rows) if rows >= EXACT_COUNT_THRESHOLD && filter.is_some() => None,
+            Some(rows) if rows >= EXACT_COUNT_THRESHOLD => Some(rows),
+            Some(_) => {
+                let where_clause = filter.map_or(String::new(), |f| format!(" where (\n{f}\n)"));
+                let rows = lease.rows(&format!("select count_big(*) from {relation}{where_clause}")).await?;
+                rows.first().and_then(|r| int(r, 0)).map(|n| n.max(0) as u64)
+            }
+        })
+    }
 }
 
 /// `object_id(N'[schema].[table]')`.

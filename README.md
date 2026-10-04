@@ -74,8 +74,9 @@ cargo test -p dbcore              # core (Postgres tests skip without a database
   completed like the script editor (`complete::complete_filter`). Elsewhere (Structure, script
   results) it searches as you type. The core sorts by the primary key (or ctid/rowid) after the
   user's columns, so pages stay stable. Pages are fetched with keyset paging (`dbcore::keyset`: `where (sort keys) > (last row's)`
-  instead of `OFFSET`), so deep pages load as fast as the first; views, keyless MySQL tables and sort types
-  that don't compare the way they sort fall back to `OFFSET`. The core also rejects a filter with a `;` between statements:
+  instead of `OFFSET`), so deep pages load as fast as the first; views, keyless MySQL and SQL Server tables and sort types
+  that don't compare the way they sort fall back to `OFFSET`. SQL Server has no row values, so it seeks with the expanded
+  `a > x or (a = x and …)` form (NULLs sort first). The core also rejects a filter with a `;` between statements:
   `dialect::normalize_filter` is the only guard for MySQL, whose text protocol runs multiple
   statements. Postgres and SQLite also prepare a single statement.
 - Structure (⌥⌘2) comes from `Driver::describe_table`: columns with defaults and comments, the
