@@ -19,7 +19,7 @@ private var devSQLite: ConnectionConfig { connections.first { $0.id == "local-sq
 private let sqliteSeeded = FileManager.default.fileExists(atPath: Drivers.sampleConnections().first { $0.id == "local-sqlite" }!.database)
 
 @Test func loadsSampleConnectionsWithSummary() {
-    #expect(connections.count == 6)
+    #expect(connections.count == 7)
     #expect(devDB.summary == "PostgreSQL · localhost:54329/app_dev")
     #expect(devDB.password == "postgres" && devDB.sslMode == .prefer)
 }
@@ -61,6 +61,32 @@ private let sqliteSeeded = FileManager.default.fileExists(atPath: Drivers.sample
     let page = try await driver.fetchRows(of: TableInfo(schema: "main", name: "settings"), limit: 10, offset: 0)
     #expect(page.rows.map { $0.values[1] } == [.text("dark"), .int(13), .double(1.25), .null, .text("0xdeadbeef")])
     await driver.disconnect()
+}
+
+private let libsqlEnabled = ProcessInfo.processInfo.environment["DBEAR_TEST_LIBSQL"] == "1"
+/// Real dev libSQL server (scripts/dev-db.sh up libsql).
+private var devLibSQL: ConnectionConfig { connections.first { $0.id == "local-libsql" }! }
+
+@Test func tursoURLsRoundTripThroughTheCore() throws {
+    let parsed = try ConnectionConfig.parse(url: "libsql://mydb-acme.turso.io?authToken=tok%2Fen")
+    #expect(parsed.kind == .libsql && parsed.host == "mydb-acme.turso.io" && parsed.password == "tok/en")
+    #expect(parsed.sslMode == .verifyFull && parsed.user == nil && !parsed.supportsMultipleDatabases)
+    #expect(parsed.url() == "libsql://mydb-acme.turso.io")
+    #expect(parsed.url(includingPassword: true) == "libsql://mydb-acme.turso.io?authToken=tok%2Fen")
+    #expect(devLibSQL.summary == "Turso · localhost:18080" && devLibSQL.sslMode == .disable)
+    #expect(ConnectionConfig.blank(.libsql).validationError != nil)
+}
+
+@Test(.enabled(if: libsqlEnabled)) func realLibSQLRoundTrip() async throws {
+    let driver = Drivers.make(for: devLibSQL)
+    try await driver.connect()
+    #expect(try await driver.listSchemas().map(\.name) == ["main"])
+    let page = try await driver.fetchRows(of: TableInfo(schema: "main", name: "settings"), limit: 10, offset: 0)
+    #expect(page.rows.map { $0.values[1] } == [.text("dark"), .int(13), .double(1.25), .null, .text("0xdeadbeef")])
+    #expect(page.totalCount == nil)
+    #expect(await driver.isConnected())
+    await driver.disconnect()
+    #expect(await !driver.isConnected())
 }
 
 @Test(.enabled(if: postgresEnabled)) func cancelsRunningQuery() async throws {

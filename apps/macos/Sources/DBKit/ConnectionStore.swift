@@ -45,7 +45,7 @@ extension ConnectionConfig {
         ConnectionConfig(DBCoreFFI.newConnectionConfig(kind: DBCoreFFI.DatabaseKind(kind)))
     }
 
-    /// Parses `postgres://user:pass@host:5432/db?sslmode=require` (also mysql://, sqlite://).
+    /// Parses `postgres://user:pass@host:5432/db?sslmode=require` (also mysql://, sqlite://, libsql://…?authToken=).
     public static func parse(url: String) throws -> ConnectionConfig {
         try bridged { ConnectionConfig(try DBCoreFFI.parseConnectionUrl(url: url)) }
     }

@@ -40,6 +40,11 @@ struct ConnectionEditor: View {
                 generalSection
                 if draft.kind == .sqlite {
                     fileSection
+                } else if draft.kind == .libsql {
+                    TursoConnectionSection(
+                        draft: $draft, token: $password, tokenPrompt: passwordPrompt,
+                        tokenEdited: { passwordEdited = true }
+                    ) { kindPicker }
                 } else {
                     serverSection
                     authSection
@@ -277,6 +282,15 @@ struct ConnectionEditor: View {
         if (old == .sqlite) != (new == .sqlite) { draft.database = "" }
         if new != .sqlite, draft.host.trimmingCharacters(in: .whitespaces).isEmpty { draft.host = "localhost" }
         if draft.port == old.defaultPort { draft.port = nil }
+        // Turso: a remote host (not localhost), no user or database, certificate verified.
+        if new == .libsql {
+            if draft.host == "localhost" { draft.host = "" }
+            draft.database = ""
+            draft.user = nil
+            draft.sslMode = .verifyFull
+        } else if old == .libsql {
+            draft.sslMode = .prefer
+        }
     }
 
     private func runTest() async {

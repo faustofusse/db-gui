@@ -4,12 +4,15 @@ public enum DatabaseKind: String, Sendable, Hashable, CaseIterable {
     case postgres
     case mysql
     case sqlite
+    /// Turso / libSQL server (remote, auth token instead of user and password).
+    case libsql
 
     public var displayName: String {
         switch self {
         case .postgres: "PostgreSQL"
         case .mysql: "MySQL"
         case .sqlite: "SQLite"
+        case .libsql: "Turso"
         }
     }
 }

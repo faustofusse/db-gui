@@ -127,6 +127,7 @@ extension DatabaseKind {
         case .postgres: self = .postgres
         case .mysql: self = .mysql
         case .sqlite: self = .sqlite
+        case .libsql: self = .libsql
         }
     }
 }
@@ -137,6 +138,7 @@ extension DBCoreFFI.DatabaseKind {
         case .postgres: self = .postgres
         case .mysql: self = .mysql
         case .sqlite: self = .sqlite
+        case .libsql: self = .libsql
         }
     }
 }
