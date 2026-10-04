@@ -1,0 +1,365 @@
+diff -ruN a/Cargo.toml b/Cargo.toml
+--- a/Cargo.toml	2026-10-03 20:28:48
++++ b/Cargo.toml	2026-10-03 21:15:21
+@@ -106,69 +106,6 @@
+ name = "tiberius"
+ path = "src/lib.rs"
+ 
+-[[example]]
+-name = "aad-auth"
+-path = "examples/aad-auth.rs"
+-
+-[[example]]
+-name = "bulk"
+-path = "examples/bulk.rs"
+-
+-[[example]]
+-name = "named-pipes"
+-path = "examples/named-pipes.rs"
+-
+-[[example]]
+-name = "tokio"
+-path = "examples/tokio.rs"
+-
+-[[test]]
+-name = "bulk"
+-path = "tests/bulk.rs"
+-
+-[[test]]
+-name = "command"
+-path = "tests/command.rs"
+-
+-[[test]]
+-name = "custom-cert"
+-path = "tests/custom-cert.rs"
+-
+-[[test]]
+-name = "deadlocks"
+-path = "tests/deadlocks.rs"
+-
+-[[test]]
+-name = "login_errors"
+-path = "tests/login_errors.rs"
+-
+-[[test]]
+-name = "named-instance-smol"
+-path = "tests/named-instance-smol.rs"
+-required-features = ["sql-browser-smol"]
+-
+-[[test]]
+-name = "named-instance-tokio"
+-path = "tests/named-instance-tokio.rs"
+-required-features = ["sql-browser-tokio"]
+-
+-[[test]]
+-name = "query"
+-path = "tests/query.rs"
+-
+-[[test]]
+-name = "serde"
+-path = "tests/serde.rs"
+-required-features = ["serde"]
+-
+-[[test]]
+-name = "special_char_password"
+-path = "tests/special_char_password.rs"
+-
+-[[test]]
+-name = "transactions"
+-path = "tests/transactions.rs"
+-
+ [dependencies.async-io]
+ version = "2"
+ optional = true
+@@ -296,6 +233,12 @@
+ [dependencies.tokio-rustls]
+ version = "0.26.4"
+ optional = true
++default-features = false
++features = [
++    "ring",
++    "logging",
++    "tls12",
++]
+ 
+ [dependencies.tokio-util]
+ version = "0.7"
+@@ -315,65 +258,6 @@
+ 
+ [dependencies.zeroize]
+ version = "1.8.2"
+-
+-[dev-dependencies.anyhow]
+-version = "1"
+-
+-[dev-dependencies.azure_core]
+-version = "1"
+-
+-[dev-dependencies.azure_identity]
+-version = "1.0"
+-
+-[dev-dependencies.chrono]
+-version = "0.4.38"
+-
+-[dev-dependencies.env_logger]
+-version = "0.11"
+-
+-[dev-dependencies.indicatif]
+-version = "0.18"
+-
+-[dev-dependencies.indoc]
+-version = "2"
+-
+-[dev-dependencies.names]
+-version = "0.14"
+-
+-[dev-dependencies.paste]
+-version = "1.0"
+-
+-[dev-dependencies.reqwest]
+-version = "0.13"
+-
+-[dev-dependencies.serde_json]
+-version = "1.0"
+-
+-[dev-dependencies.smol]
+-version = "2"
+-
+-[dev-dependencies.tokio]
+-version = "1.0"
+-features = [
+-    "macros",
+-    "sync",
+-    "io-std",
+-    "time",
+-    "io-util",
+-    "net",
+-    "rt-multi-thread",
+-]
+-
+-[dev-dependencies.tokio-util]
+-version = "0.7"
+-features = ["compat"]
+-
+-[dev-dependencies.url]
+-version = "2.5"
+-
+-[dev-dependencies.uuid]
+-version = "1.0"
+-features = ["v4"]
+ 
+ [target."cfg(unix)".dependencies.libc]
+ version = "0.2"
+diff -ruN a/src/client/tls_stream/rustls_tls_stream.rs b/src/client/tls_stream/rustls_tls_stream.rs
+--- a/src/client/tls_stream/rustls_tls_stream.rs	2026-10-03 20:28:48
++++ b/src/client/tls_stream/rustls_tls_stream.rs	2026-10-03 21:15:21
+@@ -21,7 +21,7 @@
+             danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
+             WantsClientCert,
+         },
+-        crypto::{aws_lc_rs, CryptoProvider},
++        crypto::{ring, CryptoProvider},
+         pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer, ServerName, UnixTime},
+         ClientConfig, ConfigBuilder, DigitallySignedStruct, Error as RustlsError, RootCertStore,
+         SignatureScheme,
+@@ -267,7 +267,7 @@
+ 
+ /// Resolve the rustls `CryptoProvider`: honour a process-installed default
+ /// (`CryptoProvider::install_default`) if present, otherwise fall back to
+-/// aws-lc-rs.
++/// ring (patched for dbear: no aws-lc-rs).
+ fn resolve_crypto_provider(installed: Option<Arc<CryptoProvider>>) -> Arc<CryptoProvider> {
+     match installed {
+         Some(provider) => {
+@@ -280,9 +280,9 @@
+         None => {
+             event!(
+                 Level::DEBUG,
+-                "No process-installed CryptoProvider; using the aws-lc-rs default"
++                "No process-installed CryptoProvider; using the ring default (dbear patch)"
+             );
+-            Arc::new(aws_lc_rs::default_provider())
++            Arc::new(ring::default_provider())
+         }
+     }
+ }
+@@ -501,7 +501,7 @@
+ 
+     #[test]
+     fn resolve_crypto_provider_honours_installed() {
+-        let installed = Arc::new(aws_lc_rs::default_provider());
++        let installed = Arc::new(ring::default_provider());
+         let got = resolve_crypto_provider(Some(installed.clone()));
+         assert!(
+             Arc::ptr_eq(&got, &installed),
+@@ -510,11 +510,11 @@
+     }
+ 
+     #[test]
+-    fn resolve_crypto_provider_falls_back_to_aws_lc_rs() {
++    fn resolve_crypto_provider_falls_back_to_ring() {
+         let got = resolve_crypto_provider(None);
+         assert!(
+             !got.cipher_suites.is_empty(),
+-            "the aws-lc-rs fallback must provide cipher suites"
++            "the ring fallback must provide cipher suites"
+         );
+     }
+ 
+@@ -938,7 +938,7 @@
+         // deliberately absent, so `leaf` cannot chain to anything trusted.
+         roots.add(leaf.clone()).unwrap();
+ 
+-        let provider = Arc::new(aws_lc_rs::default_provider());
++        let provider = Arc::new(ring::default_provider());
+         let verifier = tokio_rustls::rustls::client::WebPkiServerVerifier::builder_with_provider(
+             Arc::new(roots),
+             provider,
+diff -ruN a/src/tds/codec/column_data/money.rs b/src/tds/codec/column_data/money.rs
+--- a/src/tds/codec/column_data/money.rs	2026-10-03 20:28:48
++++ b/src/tds/codec/column_data/money.rs	2026-10-03 21:15:21
+@@ -1,4 +1,4 @@
+-use crate::{error::Error, sql_read_bytes::SqlReadBytes, ColumnData};
++use crate::{error::Error, sql_read_bytes::SqlReadBytes, tds::Numeric, ColumnData};
+ use bytes::BufMut;
+ use std::fmt::Display;
+ 
+@@ -217,14 +217,17 @@
+ where
+     R: SqlReadBytes + Unpin,
+ {
++    // dbear patch: exact `Numeric` (scale 4) instead of a lossy `f64`.
+     let res = match len {
+-        0 => ColumnData::F64(None),
+-        4 => ColumnData::F64(Some(src.read_i32_le().await? as f64 / 1e4)),
+-        8 => ColumnData::F64(Some({
++        0 => ColumnData::Numeric(None),
++        4 => ColumnData::Numeric(Some(Numeric::new_with_scale(
++            src.read_i32_le().await? as i128,
++            4,
++        ))),
++        8 => ColumnData::Numeric(Some({
+             let high = src.read_i32_le().await? as i64;
+-            let low = src.read_u32_le().await? as f64;
+-
+-            ((high << 32) as f64 + low) / 1e4
++            let low = src.read_u32_le().await? as i64;
++            Numeric::new_with_scale(((high << 32) | low) as i128, 4)
+         })),
+         _ => {
+             return Err(Error::Protocol(
+@@ -250,8 +253,8 @@
+ 
+         let data = decode(&mut buf.into_sql_read_bytes(), 4).await.unwrap();
+         match data {
+-            ColumnData::F64(Some(v)) => assert!((v - 1.2345).abs() < 1e-9, "v={}", v),
+-            other => panic!("expected F64, got {:?}", other),
++            ColumnData::Numeric(Some(v)) => assert_eq!(v.to_string(), "1.2345"),
++            other => panic!("expected Numeric, got {:?}", other),
+         }
+     }
+ 
+@@ -265,8 +268,8 @@
+ 
+         let data = decode(&mut buf.into_sql_read_bytes(), 8).await.unwrap();
+         match data {
+-            ColumnData::F64(Some(v)) => assert!((v - 429499.7296).abs() < 1e-6, "v={}", v),
+-            other => panic!("expected F64, got {:?}", other),
++            ColumnData::Numeric(Some(v)) => assert_eq!(v.to_string(), "429499.7296"),
++            other => panic!("expected Numeric, got {:?}", other),
+         }
+     }
+ 
+diff -ruN a/src/tds/codec/token/token_done.rs b/src/tds/codec/token/token_done.rs
+--- a/src/tds/codec/token/token_done.rs	2026-10-03 20:28:48
++++ b/src/tds/codec/token/token_done.rs	2026-10-03 21:15:21
+@@ -71,6 +71,11 @@
+         self.status.contains(DoneStatus::Attention)
+     }
+ 
++    /// The row count, when the DONE_COUNT bit says there is one (dbear patch).
++    pub(crate) fn count(&self) -> Option<u64> {
++        self.status.contains(DoneStatus::Count).then_some(self.done_rows)
++    }
++
+     pub(crate) fn rows(&self) -> u64 {
+         // The row count is only meaningful when the DONE_COUNT status bit is
+         // set (MS-TDS §2.2.7.6); otherwise the field is not a valid count.
+diff -ruN a/src/tds/stream/query.rs b/src/tds/stream/query.rs
+--- a/src/tds/stream/query.rs	2026-10-03 20:28:48
++++ b/src/tds/stream/query.rs	2026-10-03 21:15:21
+@@ -92,6 +92,8 @@
+     token_stream: Peekable<BoxStream<'a, crate::Result<ReceivedToken>>>,
+     columns: Option<Arc<Vec<Column>>>,
+     result_set_index: Option<usize>,
++    // dbear patch: row counts of the DONE tokens seen so far.
++    rows_affected: Vec<u64>,
+ }
+ 
+ impl<'a> Debug for QueryStream<'a> {
+@@ -111,11 +113,30 @@
+             token_stream: token_stream.peekable(),
+             columns: None,
+             result_set_index: None,
++            rows_affected: Vec::new(),
+         }
+     }
+ 
+     /// Moves the stream forward until having result metadata, stream end or an
+     /// error.
++    /// Row counts reported by the statements read so far (DONE tokens with
++    /// the COUNT bit), in order. Includes counts of SELECTs and of statements
++    /// run by triggers or procedures. Patched in for dbear.
++    pub fn rows_affected(&self) -> &[u64] {
++        &self.rows_affected
++    }
++
++    fn record_done(&mut self, token: &ReceivedToken) {
++        if let ReceivedToken::Done(done)
++        | ReceivedToken::DoneInProc(done)
++        | ReceivedToken::DoneProc(done) = token
++        {
++            if let Some(count) = done.count() {
++                self.rows_affected.push(count);
++            }
++        }
++    }
++
+     pub(crate) async fn forward_to_metadata(&mut self) -> crate::Result<()> {
+         loop {
+             let item = Pin::new(&mut self.token_stream)
+@@ -127,7 +148,9 @@
+             match item {
+                 Some(ReceivedToken::NewResultset(_)) => break,
+                 Some(_) => {
+-                    self.token_stream.try_next().await?;
++                    if let Some(token) = self.token_stream.try_next().await? {
++                        self.record_done(&token);
++                    }
+                 }
+                 None => break,
+             }
+@@ -205,7 +228,9 @@
+                         break;
+                     }
+                     _ => {
+-                        self.token_stream.try_next().await?;
++                        if let Some(token) = self.token_stream.try_next().await? {
++                            self.record_done(&token);
++                        }
+                         continue;
+                     }
+                 },
+@@ -422,6 +447,12 @@
+                     };
+ 
+                     Poll::Ready(Some(Ok(QueryItem::Row(row))))
++                }
++                ref token @ (ReceivedToken::Done(_)
++                | ReceivedToken::DoneInProc(_)
++                | ReceivedToken::DoneProc(_)) => {
++                    this.record_done(token);
++                    continue;
+                 }
+                 _ => continue,
+             };
