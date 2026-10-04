@@ -90,7 +90,7 @@ impl Session {
     }
 }
 
-async fn connect(config: &ConnectionConfig) -> Result<Client> {
+pub(crate) async fn connect(config: &ConnectionConfig) -> Result<Client> {
     let mut pg = tokio_postgres::Config::new();
     pg.host(&config.host)
         .port(config.port.unwrap_or(5432))
@@ -870,7 +870,7 @@ impl Drop for CancelOnDrop {
 // MARK: Errors
 
 /// `ERROR: message` plus DETAIL/HINT and, when we have the SQL, the line and column.
-fn query_error(e: &tokio_postgres::Error, sql: Option<&str>) -> Error {
+pub(crate) fn query_error(e: &tokio_postgres::Error, sql: Option<&str>) -> Error {
     let Some(db) = e.as_db_error() else {
         return if e.is_closed() {
             Error::ConnectionFailed("the server closed the connection".into())

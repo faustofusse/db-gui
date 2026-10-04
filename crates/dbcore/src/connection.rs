@@ -50,7 +50,7 @@ impl<T> Future for AbortOnDrop<T> {
     }
 }
 
-async fn on_runtime<T, F>(future: F) -> Result<T>
+pub(crate) async fn on_runtime<T, F>(future: F) -> Result<T>
 where
     F: Future<Output = Result<T>> + Send + 'static,
     T: Send + 'static,

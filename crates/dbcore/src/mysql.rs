@@ -154,7 +154,7 @@ fn opts(config: &ConnectionConfig, tls: Option<SslOpts>, found_rows: bool) -> Op
         .into()
 }
 
-async fn connect(config: &ConnectionConfig) -> Result<Conn> {
+pub(crate) async fn connect(config: &ConnectionConfig) -> Result<Conn> {
     connect_with(config, false).await
 }
 
@@ -896,7 +896,7 @@ fn type_name(column: &Column) -> String {
 // MARK: Errors
 
 /// `ERROR 1064 (42000): You have an error in your SQL syntax; … at line 1`, like the mysql client.
-fn query_error(e: &mysql_async::Error) -> Error {
+pub(crate) fn query_error(e: &mysql_async::Error) -> Error {
     match e {
         mysql_async::Error::Server(s) if s.code == ER_QUERY_INTERRUPTED => Error::Cancelled,
         mysql_async::Error::Server(s) => Error::Query(format!("ERROR {} ({}): {}", s.code, s.state, s.message)),

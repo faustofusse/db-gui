@@ -71,7 +71,7 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 /// `~/x.db` → `/Users/me/x.db`.
-fn database_path(database: &str) -> PathBuf {
+pub(crate) fn database_path(database: &str) -> PathBuf {
     let database = database.trim();
     match (database.strip_prefix("~/"), std::env::var_os("HOME")) {
         (Some(rest), Some(home)) => PathBuf::from(home).join(rest),
