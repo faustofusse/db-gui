@@ -97,8 +97,10 @@ cargo test -p dbcore              # core (Postgres tests skip without a database
   Local libSQL files are SQLite files: open them as SQLite.
 - **Dump / restore** (connection or tables-list menus): `dbcore::dump` writes plain SQL (optionally
   gzipped) that `psql`, `mysql` and `sqlite3` can load, from one consistent snapshot, streaming to
-  `<file>.partial` until done. `dbcore::restore` runs such scripts, also `pg_dump`/`mysqldump`/`sqlite3 .dump`
-  plain output, including `COPY … FROM stdin` blocks. Postgres dumps skip owners and grants
+  `<file>.partial` until done. Turso dumps use the SQLite format; SQL Server dumps are T-SQL with `GO`
+  batches (sqlcmd/SSMS), skipping what the file header lists (permissions, sequences, synonyms…).
+  `dbcore::restore` runs such scripts, also `pg_dump`/`mysqldump`/`sqlite3 .dump` plain output,
+  including `COPY … FROM stdin` blocks. Postgres dumps skip owners and grants
   (`pg_dump --no-owner --no-privileges`). CLI for testing: `cargo run -p dbcore --example dump -- dump <url> out.sql.gz`.
   Round trips are tested in `crates/dbcore/tests/dump_*.rs` (fixtures in `dev/dump/`).
 - `bundle-mac.sh` signs with your "Apple Development" identity when you have one, so the

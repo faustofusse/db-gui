@@ -14,7 +14,7 @@ use crate::model::Value;
 const DAYS_0001_TO_UNIX: i64 = 719_162;
 const DAYS_1900_TO_UNIX: i64 = 25_567;
 
-pub(super) fn value(data: &ColumnData<'_>) -> Value {
+pub(crate) fn value(data: &ColumnData<'_>) -> Value {
     match data {
         ColumnData::U8(v) => v.map_or(Value::Null, |v| Value::Int(v.into())),
         ColumnData::I16(v) => v.map_or(Value::Null, |v| Value::Int(v.into())),
@@ -39,7 +39,7 @@ pub(super) fn value(data: &ColumnData<'_>) -> Value {
 }
 
 /// Exact decimal text: `-12.50`, `42` (scale 0), `0.001`.
-pub(super) fn numeric(n: Numeric) -> String {
+pub(crate) fn numeric(n: Numeric) -> String {
     let digits = n.value().unsigned_abs().to_string();
     let scale = n.scale() as usize;
     let sign = if n.value() < 0 { "-" } else { "" };
@@ -161,7 +161,7 @@ pub(super) fn type_name(ty: ColumnType) -> &'static str {
 
 /// A catalog column's type as written in DDL: `nvarchar(50)`, `varbinary(max)`, `decimal(10,2)`,
 /// `datetime2(3)`. `max_length` is in bytes (-1 = max), as `sys.columns` reports it.
-pub(super) fn column_type(name: &str, max_length: i64, precision: i64, scale: i64) -> String {
+pub(crate) fn column_type(name: &str, max_length: i64, precision: i64, scale: i64) -> String {
     let length = |bytes_per_char: i64| match max_length {
         -1 => "max".to_string(),
         n => (n / bytes_per_char).to_string(),

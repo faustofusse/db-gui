@@ -10,7 +10,7 @@
 //! tiberius is vendored with a small patch (see `vendor/README.md`): ring instead of aws-lc-rs,
 //! DONE row counts on query streams, exact MONEY values.
 
-mod decode;
+pub(crate) mod decode;
 mod describe;
 mod paging;
 pub mod script;
@@ -35,7 +35,7 @@ use crate::model::*;
 
 use self::script::{check_filter, format_error, split_batches};
 
-type Client = tiberius::Client<Compat<TcpStream>>;
+pub(crate) type Client = tiberius::Client<Compat<TcpStream>>;
 
 const MSSQL: Dialect = Dialect(DatabaseKind::SqlServer);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -248,7 +248,7 @@ impl SqlServerDriver {
 
 // MARK: Connecting
 
-async fn connect(config: &ConnectionConfig, setup: &str) -> Result<Client> {
+pub(crate) async fn connect(config: &ConnectionConfig, setup: &str) -> Result<Client> {
     let attempt = |level: EncryptionLevel| async move {
         match tokio::time::timeout(CONNECT_TIMEOUT, open(config, level)).await {
             Ok(result) => result,
@@ -764,7 +764,7 @@ fn flag(row: &[Value], i: usize) -> bool {
 // MARK: Errors
 
 /// Server errors as SSMS shows them; everything else as a connection problem.
-fn query_error(e: &TdsError, first_line: u32) -> Error {
+pub(crate) fn query_error(e: &TdsError, first_line: u32) -> Error {
     match e {
         TdsError::Server(token) => Error::Query(format_error(token, first_line)),
         TdsError::Io { .. } | TdsError::Tls(_) | TdsError::Routing { .. } => Error::ConnectionFailed(error_chain(e)),

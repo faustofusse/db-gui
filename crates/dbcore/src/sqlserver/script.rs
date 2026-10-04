@@ -52,7 +52,7 @@ pub fn split_batches(script: &str) -> Vec<Batch> {
 }
 
 /// `GO`, `go 5`, `GO -- comment`: the repeat count, or `None` for any other line.
-fn go_line(line: &str) -> Option<u32> {
+pub(crate) fn go_line(line: &str) -> Option<u32> {
     let line = line.trim();
     let line = line.split_once("--").map_or(line, |(code, _)| code).trim();
     if !line.get(..2).is_some_and(|go| go.eq_ignore_ascii_case("go")) {

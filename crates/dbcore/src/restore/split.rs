@@ -4,6 +4,7 @@
 //! `--`, `#`, nested `/* */`), MySQL's `DELIMITER`, psql's `COPY … FROM stdin` data blocks
 //! (ended by `\.`) and meta-commands (`\connect`, `\restrict`…), and statements whose bodies
 //! contain `;` (`CREATE TRIGGER … BEGIN … END`, SQL-standard function bodies `BEGIN ATOMIC … END`).
+//! SQL Server scripts are split into batches on `GO` lines instead, like sqlcmd (`;` doesn't split).
 
 use crate::model::DatabaseKind;
 
@@ -49,13 +50,18 @@ pub struct Splitter {
     previous: char,
     in_copy: bool,
     copy: Vec<u8>,
+    /// SQL Server: the line after the last `GO`, where the batch's text starts.
+    batch_start: usize,
 }
 
 impl Splitter {
     pub fn new(kind: DatabaseKind) -> Self {
+        // Turso / libSQL speaks SQLite's SQL.
+        let kind = if kind == DatabaseKind::Libsql { DatabaseKind::Sqlite } else { kind };
         Self {
             kind,
-            delimiter: ";".into(),
+            // SQL Server batches end at `GO` lines, never at `;`.
+            delimiter: if kind == DatabaseKind::SqlServer { String::new() } else { ";".into() },
             buffer: String::new(),
             state: State::Normal,
             has_code: false,
@@ -67,7 +73,12 @@ impl Splitter {
             previous: ' ',
             in_copy: false,
             copy: Vec::new(),
+            batch_start: 1,
         }
+    }
+
+    fn sqlserver(&self) -> bool {
+        self.kind == DatabaseKind::SqlServer
     }
 
     fn mysql(&self) -> bool {
@@ -113,7 +124,24 @@ impl Splitter {
             return self.push_copy_line(line.as_bytes(), out);
         }
         self.line += 1;
-        if self.state == State::Normal && !self.has_code {
+        if self.sqlserver() && self.state == State::Normal {
+            if let Some(repeat) = crate::sqlserver::script::go_line(line) {
+                self.end_word();
+                let start = self.batch_start;
+                for _ in 0..repeat {
+                    self.start_line = start;
+                    let (buffer, has_code) = (self.buffer.clone(), self.has_code);
+                    self.end_statement(out);
+                    self.buffer = buffer;
+                    self.has_code = has_code;
+                }
+                self.buffer.clear();
+                self.has_code = false;
+                self.batch_start = self.line + 1;
+                return;
+            }
+        }
+        if self.state == State::Normal && !self.has_code && !self.sqlserver() {
             let trimmed = line.trim();
             if !self.mysql() && trimmed.starts_with('\\') {
                 out.push(Item::Meta { command: trimmed.to_string(), line: self.line });
@@ -162,7 +190,7 @@ impl Splitter {
                                 self.state = State::Quoted { close: '`', backslash: false };
                                 self.code();
                             }
-                            '[' if self.kind == DatabaseKind::Sqlite => {
+                            '[' if matches!(self.kind, DatabaseKind::Sqlite | DatabaseKind::SqlServer) => {
                                 self.state = State::Quoted { close: ']', backslash: false };
                                 self.code();
                             }
@@ -221,7 +249,7 @@ impl Splitter {
                     if rest.starts_with("*/") {
                         step = 2;
                         self.state = if depth == 1 { State::Normal } else { State::BlockComment(depth - 1) };
-                    } else if rest.starts_with("/*") && self.postgres() {
+                    } else if rest.starts_with("/*") && (self.postgres() || self.sqlserver()) {
                         step = 2;
                         self.state = State::BlockComment(depth + 1);
                     }
@@ -246,6 +274,9 @@ impl Splitter {
             self.in_copy = false;
         }
         self.end_word();
+        if self.sqlserver() {
+            self.start_line = self.batch_start;
+        }
         self.end_statement(out);
     }
 
@@ -272,7 +303,7 @@ impl Splitter {
         if self.head.len() < 6 {
             self.head.push(word.clone());
         }
-        if !self.mysql() && self.has_body() {
+        if !self.mysql() && !self.sqlserver() && self.has_body() {
             match word.as_str() {
                 "BEGIN" | "CASE" => self.depth += 1,
                 "END" => self.depth = self.depth.saturating_sub(1),
@@ -288,7 +319,9 @@ impl Splitter {
     }
 
     fn end_statement(&mut self, out: &mut Vec<Item>) {
-        let sql = self.buffer.trim().to_string();
+        // A SQL Server batch is sent exactly as written (module definitions keep their text, and
+        // the server's line numbers count from the batch's first line).
+        let sql = if self.sqlserver() { self.buffer.clone() } else { self.buffer.trim().to_string() };
         let has_code = self.has_code;
         let is_copy_from_stdin = self.postgres() && self.head.first().is_some_and(|w| w == "COPY") && copy_from_stdin(&sql);
         self.buffer.clear();
@@ -406,6 +439,21 @@ mod tests {
         assert_eq!(
             statements(MY, script),
             ["CREATE PROCEDURE p() BEGIN select 1; select 2; END", "select 3", "/*!40101 SET NAMES utf8mb4 */"]
+        );
+    }
+
+    #[test]
+    fn sqlserver_go_batches() {
+        const MS: DatabaseKind = DatabaseKind::SqlServer;
+        let script = "-- header\nSET NOCOUNT ON;\nselect 1;\nGO\n\nCREATE PROCEDURE p AS\nBEGIN\n  select 'GO'; select [a;b]\nEND\ngo 2\n/* GO\n*/ select 2\n";
+        assert_eq!(
+            split(MS, script),
+            [
+                Item::Statement { sql: "-- header\nSET NOCOUNT ON;\nselect 1;\n".into(), line: 1 },
+                Item::Statement { sql: "\nCREATE PROCEDURE p AS\nBEGIN\n  select 'GO'; select [a;b]\nEND\n".into(), line: 5 },
+                Item::Statement { sql: "\nCREATE PROCEDURE p AS\nBEGIN\n  select 'GO'; select [a;b]\nEND\n".into(), line: 5 },
+                Item::Statement { sql: "/* GO\n*/ select 2\n".into(), line: 11 },
+            ]
         );
     }
 

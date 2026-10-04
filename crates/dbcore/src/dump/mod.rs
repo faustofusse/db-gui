@@ -1,18 +1,20 @@
 //! Database dumps: plain SQL (optionally gzipped) that `psql`, the `mysql` client and `sqlite3`
 //! can load, and so can [`crate::restore`].
 //!
-//! Every engine has its own module that opens a dedicated connection, reads in one consistent
+//! Every engine (Postgres, MySQL, SQLite, Turso / libSQL, SQL Server) has its own module that opens a dedicated connection, reads in one consistent
 //! snapshot and writes raw wire values (never the lossy grid [`crate::Value`]). Output streams to
 //! `<path>.partial` through a writer thread ([`writer`]) and is renamed when complete, so a
 //! cancelled or failed dump never leaves a file that looks valid.
 //!
 //! New engines: add a module and an arm in [`run`].
 
+pub(crate) mod libsql;
 mod literal;
 mod mysql;
 mod order;
 mod postgres;
 mod sqlite;
+mod sqlserver;
 mod writer;
 
 pub use literal::sqlite_float;
@@ -46,8 +48,8 @@ impl DumpContent {
     }
 }
 
-/// Which objects to dump. Schemas are Postgres schemas; a MySQL connection dumps its one
-/// database and SQLite its `main` database, whatever schema names are given.
+/// Which objects to dump. Schemas are Postgres and SQL Server schemas; a MySQL connection dumps
+/// its one database, and SQLite and Turso their `main` database, whatever schema names are given.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum DumpScope {
     #[default]
@@ -259,6 +261,8 @@ async fn engine(config: &ConnectionConfig, ctx: &mut Ctx) -> Result<()> {
         DatabaseKind::Postgres => postgres::dump(config, ctx).await,
         DatabaseKind::Mysql => mysql::dump(config, ctx).await,
         DatabaseKind::Sqlite => sqlite::dump(config, ctx).await,
+        DatabaseKind::Libsql => libsql::dump(config, ctx).await,
+        DatabaseKind::SqlServer => sqlserver::dump(config, ctx).await,
         _ => Err(Error::Unsupported(format!("dumping {} databases", config.kind.display_name()))),
     }
 }

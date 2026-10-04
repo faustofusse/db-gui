@@ -17,7 +17,7 @@
 //! Local libSQL files are SQLite files and use the SQLite driver.
 
 mod catalog;
-mod hrana;
+pub(crate) mod hrana;
 mod script;
 pub(crate) mod url;
 

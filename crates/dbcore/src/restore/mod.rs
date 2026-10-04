@@ -1,14 +1,16 @@
 //! Restoring SQL scripts: dbear dumps, and the plain output of `pg_dump`, `mysqldump` and
-//! `sqlite3 .dump` (gzipped or not).
+//! `sqlite3 .dump` (gzipped or not), and T-SQL scripts with `GO` batches (sqlcmd, SSMS).
 //!
 //! A blocking thread reads and splits the file ([`split`]) and sends statements to the engine's
 //! runner, which executes them on a dedicated connection: `COPY … FROM stdin` blocks go through
 //! Postgres' COPY protocol. Nothing is loaded whole, so big dumps restore in constant memory.
 
+mod libsql;
 mod mysql;
 mod postgres;
 pub mod split;
 mod sqlite;
+mod sqlserver;
 
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
@@ -108,6 +110,8 @@ async fn runner(config: ConnectionConfig, rx: mpsc::Receiver<Result<Item>>, tall
         DatabaseKind::Postgres => postgres::run(&config, rx, tally).await,
         DatabaseKind::Mysql => mysql::run(&config, rx, tally).await,
         DatabaseKind::Sqlite => sqlite::run(&config, rx, tally).await,
+        DatabaseKind::Libsql => libsql::run(&config, rx, tally).await,
+        DatabaseKind::SqlServer => sqlserver::run(&config, rx, tally).await,
         _ => Err(Error::Unsupported(format!("restoring into {} databases", config.kind.display_name()))),
     }
 }
@@ -217,6 +221,11 @@ impl Tally {
 
     fn single_transaction(&self) -> bool {
         self.options.single_transaction
+    }
+
+    /// Errors end the restore (stop on error, or the transaction is lost anyway).
+    fn stops_on_error(&self) -> bool {
+        self.options.stop_on_error || self.options.single_transaction
     }
 
     fn cancelled(&self) -> bool {

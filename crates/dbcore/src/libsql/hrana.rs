@@ -256,7 +256,7 @@ impl HValue {
 }
 
 /// Servers differ on base64 padding; accept both.
-const BASE64: base64::engine::GeneralPurpose = base64::engine::GeneralPurpose::new(
+pub(crate) const BASE64: base64::engine::GeneralPurpose = base64::engine::GeneralPurpose::new(
     &base64::alphabet::STANDARD,
     base64::engine::GeneralPurposeConfig::new().with_decode_padding_mode(base64::engine::DecodePaddingMode::Indifferent),
 );
